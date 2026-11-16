@@ -1,4 +1,4 @@
-# guard-core.ps1 — locking engine, no UI. Dot-sourced by guard.ps1, the watcher, and tests.
+﻿# guard-core.ps1 — locking engine, no UI. Dot-sourced by guard.ps1, the watcher, and tests.
 # All functions return a result object; they never write to the host.
 
 $ErrorActionPreference = 'Stop'
