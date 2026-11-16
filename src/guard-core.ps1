@@ -55,6 +55,29 @@ function Unlock-GuardFile {
     return [pscustomobject]@{ Path=$Path; State='fail'; Reason=$r.Out }
 }
 
+function Test-GuardAdmin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Set-GuardOwnerSystem {
+    # Make SYSTEM the owner of the folder and everything in it, and give the user read/write
+    # back so files still open and programs can still add new files. Admin only.
+    param([string]$Folder, [string]$User)
+    if (-not (Test-GuardAdmin)) { return [pscustomobject]@{ Ok=$false; Reason='not admin' } }
+    $r1 = Invoke-Icacls @($Folder, '/setowner', 'NT AUTHORITY\SYSTEM', '/T', '/C')
+    $r2 = Invoke-Icacls @($Folder, '/grant', ($User+':(OI)(CI)M'), '/T', '/C')   # modify, so read+write+add
+    return [pscustomobject]@{ Ok=($r1.Ok -and $r2.Ok); OwnerOut=$r1.Out; GrantOut=$r2.Out }
+}
+
+function Set-GuardOwnerUser {
+    # Give ownership back to the user (used by remove/uninstall). Admin only.
+    param([string]$Folder, [string]$User)
+    if (-not (Test-GuardAdmin)) { return [pscustomobject]@{ Ok=$false; Reason='not admin' } }
+    $r = Invoke-Icacls @($Folder, '/setowner', $User, '/T', '/C')
+    return [pscustomobject]@{ Ok=$r.Ok; Out=$r.Out }
+}
+
 function Lock-GuardFolder {
     # Three rules: the folder can't be deleted/renamed AND can't delete its own children (DE,DC);
     # the folder above can't delete this folder through its key (DC).

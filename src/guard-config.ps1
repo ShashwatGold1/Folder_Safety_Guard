@@ -2,7 +2,10 @@
 # Dot-sourced after guard-core.ps1.
 
 # Overridable so tests can redirect away from C:\ProgramData.
-if (-not $script:GuardConfigPath) { $script:GuardConfigPath = Join-Path $env:ProgramData 'guard\config.json' }
+if (-not $script:GuardConfigPath) {
+    if ($env:GUARD_CONFIG) { $script:GuardConfigPath = $env:GUARD_CONFIG }
+    else { $script:GuardConfigPath = Join-Path $env:ProgramData 'guard\config.json' }
+}
 
 function New-GuardConfig {
     return [pscustomobject]@{
@@ -36,7 +39,7 @@ function Save-GuardConfig {
         if (-not (Test-Path -LiteralPath $f.path)) { continue }
         $jp = Join-Path $f.path '_guard.json'
         # must unlock before overwriting (it is a protected file), then re-lock
-        if ($User) { Unlock-GuardFile -Path $jp -User $User | Out-Null }
+        if ($User -and (Test-Path -LiteralPath $jp)) { Unlock-GuardFile -Path $jp -User $User | Out-Null }
         try {
             Write-GuardJsonFile -Path $jp -Config $Config
             (Get-Item -LiteralPath $jp -Force).Attributes = 'Hidden'
