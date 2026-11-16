@@ -43,6 +43,7 @@ function Lock-GuardFile {
     if (Test-GuardSkip -Name $name -Extra $Skip) { return [pscustomobject]@{ Path=$Path; State='skipped'; Reason='skip-list' } }
     if ($name -like '_guard.json') { } # the memory file is locked like any other
     if (Test-GuardBusy -Path $Path)  { return [pscustomobject]@{ Path=$Path; State='waiting'; Reason='open in another program' } }
+    if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
     $r = Invoke-Icacls @($Path, '/deny', ($User+':(DE)'))
     if ($r.Ok) { return [pscustomobject]@{ Path=$Path; State='locked' } }
     return [pscustomobject]@{ Path=$Path; State='fail'; Reason=$r.Out }
@@ -66,8 +67,14 @@ function Set-GuardOwnerSystem {
     param([string]$Folder, [string]$User)
     if (-not (Test-GuardAdmin)) { return [pscustomobject]@{ Ok=$false; Reason='not admin' } }
     $r1 = Invoke-Icacls @($Folder, '/setowner', 'NT AUTHORITY\SYSTEM', '/T', '/C')
-    $r2 = Invoke-Icacls @($Folder, '/grant', ($User+':(OI)(CI)M'), '/T', '/C')   # modify, so read+write+add
-    return [pscustomobject]@{ Ok=($r1.Ok -and $r2.Ok); OwnerOut=$r1.Out; GrantOut=$r2.Out }
+    # cut inheritance (keep copies), then replace the user's Full Control with Modify:
+    # read, write, add files, but no permission changes and no take-ownership.
+    $r2 = Invoke-Icacls @($Folder, '/inheritance:d')
+    $r3 = Invoke-Icacls @($Folder, '/remove:g', $User, '/T', '/C')
+    $r4 = Invoke-Icacls @($Folder, '/grant', ($User+':(OI)(CI)M'))
+    # OWNER RIGHTS = Modify: files the user creates can't have their lock changed by the user either
+    $r5 = Invoke-Icacls @($Folder, '/grant', '*S-1-3-4:(OI)(CI)M')
+    return [pscustomobject]@{ Ok=($r1.Ok -and $r2.Ok -and $r3.Ok -and $r4.Ok -and $r5.Ok); Out=($r1.Out,$r2.Out,$r3.Out,$r4.Out,$r5.Out -join "`n") }
 }
 
 function Set-GuardOwnerUser {
@@ -75,7 +82,8 @@ function Set-GuardOwnerUser {
     param([string]$Folder, [string]$User)
     if (-not (Test-GuardAdmin)) { return [pscustomobject]@{ Ok=$false; Reason='not admin' } }
     $r = Invoke-Icacls @($Folder, '/setowner', $User, '/T', '/C')
-    return [pscustomobject]@{ Ok=$r.Ok; Out=$r.Out }
+    $r2 = Invoke-Icacls @($Folder, '/reset', '/T', '/C')   # back to normal inherited permissions
+    return [pscustomobject]@{ Ok=($r.Ok -and $r2.Ok); Out=($r.Out + "`n" + $r2.Out) }
 }
 
 function Lock-GuardFolder {

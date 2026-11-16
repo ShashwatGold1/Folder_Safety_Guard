@@ -225,6 +225,7 @@ function Cmd-Init($arg) {
     $sz = ($files | Measure-Object Length -Sum).Sum
     Say ""; Say ("  {0}  ·  {1}  ·  {2} files  ·  {3:N0} B" -f (Get-FolderName $path), $path, $files.Count, $sz)
     Say ""
+    Set-GuardOwnerSystem -Folder $path -User $script:User | Out-Null
     $r = Lock-GuardTree -Folder $path -User $script:User -Skip @()
     Ok "owner" ("folder + {0} files" -f $files.Count)
     Ok "locking" "folder + folder above"
@@ -252,6 +253,7 @@ function Cmd-Remove($arg) {
         $jp = Join-Path $f.path '_guard.json'
         Unlock-GuardFile -Path $jp -User $script:User | Out-Null
         Remove-Item -LiteralPath $jp -Force -EA SilentlyContinue
+        Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
         Ok "unlocked" $f.name
     }
     $keep = @(); foreach ($f in $script:Cfg.folders) { if ($targets -notcontains $f) { $keep += $f } }
