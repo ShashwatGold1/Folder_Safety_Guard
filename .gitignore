@@ -1,0 +1,3 @@
+src/test-core.ps1
+testing_env/
+*.log
