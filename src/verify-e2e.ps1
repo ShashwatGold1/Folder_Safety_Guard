@@ -80,6 +80,14 @@ Check 'missing path: no exception, Ok = false' ((-not $threw) -and $x -and -not 
 
 $rawBefore = Raw-Path
 
+Section 'install.ps1 survives  irm | iex'
+$bytes = [IO.File]::ReadAllBytes("$repo\install.ps1")
+Check 'install.ps1 has no BOM' (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF))
+Check 'install.ps1 is pure ASCII' (-not ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1))
+$sbText = [Text.Encoding]::UTF8.GetString($bytes)   # what irm hands to iex
+$sb = $null; try { $sb = [scriptblock]::Create($sbText) } catch { }
+Check 'parses as a script block with its param block' ($sb -and $sb.Ast.ParamBlock)
+
 # ---------------------------------------------------------------------------
 Section 'clean start'
 if (Test-Path $prefix) { Write-Host '  guard is already installed here - uninstall it first' -ForegroundColor Red; return }
@@ -371,8 +379,11 @@ Check '_guard.json kept as memory' ((Test-Path "$A\_guard.json") -and (Test-Path
 # ---------------------------------------------------------------------------
 Section 'reinstall finds the memory and restores'
 $env:GUARD_ANSWERS = '1'
-$o = & "$repo\install.ps1" -Source $src -NoElevate 6>&1 | Out-String
+# run it the way  irm | iex  does: text, no file behind it (installer must save itself + run apart)
+$o = & ([scriptblock]::Create($sbText)) -Source $src 6>&1 | Out-String
 $env:GUARD_ANSWERS = ''
+Check 'no-file run (iex style) worked' ($o -match 'installed successfully')
+Check 'iex style left nothing behind in this session' (-not (Get-Command Bar-Start -EA SilentlyContinue))
 Write-Host $o -ForegroundColor DarkGray
 Check 'installer found the memory' ($o -match 'memory\s+found in')
 Check 'restore: 2 folders protected' ($o -match '2 folders are successfully protected')

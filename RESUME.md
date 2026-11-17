@@ -9,7 +9,10 @@ All of guard is built and verified on this PC (2026-11-17, admin session).
 | `src\test-shell.ps1` | no | 16 / 16 |
 | `src\test-watch.ps1` | no | 2 / 2 |
 | `src\verify-agent.ps1` | yes | 11 / 11 |
-| `src\verify-e2e.ps1` | yes | 115 / 115 |
+| `src\verify-e2e.ps1` | yes | 137 / 137 |
+
+Run the unit suites with `src\run-tests.ps1`. When elevated, it switches the admin-only test flag
+(HKLM `GUARD_TEST=1`) on for the run and always off again.
 
 `verify-e2e.ps1` is the full life on a real PC. It:
 - installs into Program Files with the SYSTEM task;
@@ -33,5 +36,7 @@ Not testable here:
 - **The GitHub download path.** This only works after a push.
 
 Notes:
-- Source files must be saved UTF-8 with BOM (PowerShell 5.1). Re-encode after any edit.
+- `src\*.ps1` must be saved UTF-8 **with** BOM, because PowerShell 5.1 reads `-File` scripts as ANSI otherwise.
+- `install.ps1` must stay **pure ASCII with no BOM**, because through `irm | iex` a BOM breaks its `param()` block.
+- Re-encode after any edit.
 - `install.ps1` lives in the repo root (the install line points there); everything else is in `src/`.

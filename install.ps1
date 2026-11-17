@@ -1,4 +1,7 @@
-﻿# install.ps1 — sets guard up, or updates it in place. Admin required.
+# install.ps1 - sets guard up, or updates it in place. Admin required.
+# Keep this file pure ASCII with NO BOM: run through  irm | iex  a BOM arrives as a stray
+# character before param(...) and the script no longer parses. Non-ASCII output is built
+# from char codes ($dot, $arrow) instead.
 #   irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex
 param(
     [string]$Prefix = 'C:\Program Files\guard',
@@ -13,6 +16,7 @@ param(
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+$dot = [string][char]0x00B7; $arrow = [string][char]0x2192
 $ErrorActionPreference = 'Stop'
 $repo = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
 $runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
@@ -68,18 +72,27 @@ function Fail-Out([string]$problem,[string]$fix) {
     Done-Pause
 }
 
-# --- elevate ---------------------------------------------------------------
-if (-not (Is-Admin) -and -not $NoElevate) {
-    # run through  irm | iex  there is no file: save ourselves first, then relaunch elevated
-    $self = $MyInvocation.MyCommand.Path
-    if (-not $self) {
-        $self = Join-Path $env:TEMP 'guard-install.ps1'
-        $text = $null
-        if ($Source) { $text = Get-Content (Join-Path (Split-Path $Source -Parent) 'install.ps1') -Raw -Encoding UTF8 }
-        else { $text = (Invoke-WebRequest "$repo/install.ps1" -UseBasicParsing).Content }
-        [IO.File]::WriteAllText($self, $text, (New-Object Text.UTF8Encoding($true)))
+# --- run from a file, elevated -----------------------------------------------
+# Through  irm | iex  there is no file, and the code would run inside the user's own terminal
+# session (leaving guard's functions and settings behind in it). So: save ourselves to a temp
+# file first, then run that in its own process - elevated through UAC if needed.
+$self = $MyInvocation.MyCommand.Path
+$who = $ForUser; if (-not $who) { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+if (-not $self) {
+    $self = Join-Path $env:TEMP 'guard-install.ps1'
+    $text = $null
+    if ($Source) { $text = Get-Content (Join-Path (Split-Path $Source -Parent) 'install.ps1') -Raw -Encoding UTF8 }
+    else { $text = (Invoke-WebRequest "$repo/install.ps1" -UseBasicParsing).Content }
+    [IO.File]::WriteAllText($self, $text, (New-Object Text.UTF8Encoding($false)))
+    if ((Is-Admin) -or $NoElevate) {
+        $fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-ForUser', $who, '-Prefix', $Prefix)
+        if ($Source) { $fwd += @('-Source', $Source) }
+        if ($NoElevate) { $fwd += '-NoElevate' }
+        & powershell.exe @fwd
+        return
     }
-    $who = $ForUser; if (-not $who) { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+}
+if (-not (Is-Admin) -and -not $NoElevate) {
     $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Pause -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $a += " -Source `"$Source`"" }
     Write-Host "guard  asking for administrator (UAC)..."
@@ -91,14 +104,14 @@ if (-not (Is-Admin) -and -not $NoElevate) {
 $u = $ForUser; if (-not $u) { $u = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
 if ($Update) {
     $f = $From; if (-not $f) { $f = '?' }; $t2 = $To; if (-not $t2) { $t2 = 'new' }
-    $script:BarWhat = "updating $f → $t2"
+    $script:BarWhat = "updating $f $arrow $t2"
 }
 Bar-Start
 
 # 1 check
 if ($PSVersionTable.PSVersion.Major -lt 5) { StepFail 'check' 'needs PowerShell 5 or newer'; Fail-Out 'PowerShell is too old' 'install Windows Management Framework 5.1, then run the install line again'; return }
 $win = 'Windows 10'; if ([Environment]::OSVersion.Version.Build -ge 22000) { $win = 'Windows 11' }
-StepOk 'check' ("PowerShell {0}.{1}  ·  {2}  ·  user {3}" -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor, $win, ($u -split '\\')[-1])
+StepOk 'check' ("PowerShell {0}.{1}  $dot  {2}  $dot  user {3}" -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor, $win, ($u -split '\\')[-1])
 
 # 2 uac
 $uac = 1; try { $uac = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA } catch {}
@@ -107,7 +120,7 @@ if ($uac -ne 1) {
     Fail-Out 'UAC is off. Any program could unlock protected files without a prompt.' ("1. Win+R, type  UserAccountControlSettings`n" + "            2. move the slider to the default notch or higher, OK, restart`n" + "            3. run the install line again")
     return
 }
-StepOk 'uac' 'on  ·  admin rights granted'
+StepOk 'uac' "on  $dot  admin rights granted"
 
 # 3 folder
 try {
@@ -134,8 +147,8 @@ try {
     $cmdPath = Join-Path $Prefix 'guard.cmd'
     $cmdSame = (Test-Path $cmdPath) -and ((Get-Content $cmdPath -Raw) -eq $cmd)
     if (-not $cmdSame) { [IO.File]::WriteAllText($cmdPath, $cmd, (New-Object Text.ASCIIEncoding)) }
-    if ($Update) { StepOk 'files' ("{0} of {1} files updated  ·  guard.cmd {2}" -f $changed, $runtime.Count, $(if ($cmdSame) {'same'} else {'updated'})) }
-    else { StepOk 'files' 'guard.ps1  ·  guard.cmd  ·  modules' }
+    if ($Update) { StepOk 'files' ("{0} of {1} files updated  $dot  guard.cmd {2}" -f $changed, $runtime.Count, $(if ($cmdSame) {'same'} else {'updated'})) }
+    else { StepOk 'files' "guard.ps1  $dot  guard.cmd  $dot  modules" }
 } catch { StepFail 'files' $_.Exception.Message; Fail-Out "couldn't get the guard files" 'check the internet connection, then run the install line again'; return }
 
 # from here on, guard's own code does the work (PATH, memory, restore)
@@ -156,7 +169,7 @@ if ($NoTask) { StepOk 'task' 'skipped (test)' } else {
         $pr  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
         $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $taskName -Action $act -Trigger $trg -Principal $pr -Settings $set -Force | Out-Null
-        StepOk 'task' ("`"{0}`"  ·  runs as SYSTEM  ·  at logon  ·  hidden  ·  restarts itself if it stops" -f $taskName)
+        StepOk 'task' ("`"{0}`"  $dot  runs as SYSTEM  $dot  at logon  $dot  hidden  $dot  restarts itself if it stops" -f $taskName)
     } catch { StepFail 'task' $_.Exception.Message; Fail-Out "couldn't create the background task" 'run the install line again'; return }
 }
 
@@ -173,12 +186,12 @@ $restoreFrom = $null
 if ($Update) {
     $c = Load-GuardConfig
     $n = 0; foreach ($f in $c.folders) { if (Test-Path -LiteralPath $f.path) { $n += @(Get-GuardFiles -Folder $f.path).Count } }
-    StepOk 'folders' ("{0} protected folders untouched  ·  {1} files still locked" -f @($c.folders).Count, $n)
+    StepOk 'folders' ("{0} protected folders untouched  $dot  {1} files still locked" -f @($c.folders).Count, $n)
 } elseif (Test-Path -LiteralPath $script:GuardConfigPath) {
     StepOk 'memory' 'config.json already there'
 } else {
     $mem = Find-GuardMemory
-    if ($mem -and @($mem.folders).Count) { $restoreFrom = $mem; StepOk 'memory' ("found in {0}  ·  lists {1} folders" -f $script:MemoryFoundIn, @($mem.folders).Count) }
+    if ($mem -and @($mem.folders).Count) { $restoreFrom = $mem; StepOk 'memory' ("found in {0}  $dot  lists {1} folders" -f $script:MemoryFoundIn, @($mem.folders).Count) }
     else {
         # write an empty config now: the background guard then never has to search the disks
         Save-GuardConfig -Config (New-GuardConfig) -User $u
