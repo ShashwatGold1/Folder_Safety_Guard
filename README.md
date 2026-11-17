@@ -10,13 +10,17 @@ In a normal PowerShell window:
 
     irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex
 
+Or in a normal Command Prompt (cmd) window:
+
+    powershell -NoProfile -Command "irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex"
+
 Click Yes on the Windows prompt (UAC must be on).
 
 ## Use
 
 Open a new terminal, type  guard , click Yes, then:
 
-    init C:\path\to\folder
+    init
 
 The folder, the folder above it and every file inside can no
 longer be deleted or renamed. New files are locked as soon as
