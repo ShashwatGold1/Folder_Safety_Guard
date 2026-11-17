@@ -6,11 +6,11 @@ permissions, so it keeps working long after you set it up.
 
 ## Install
 
-In a normal PowerShell window:
+PowerShell :
 
     irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex
 
-Or in a normal Command Prompt (cmd) window:
+Command Prompt (cmd) :
 
     powershell -NoProfile -Command "irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex"
 
