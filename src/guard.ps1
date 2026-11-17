@@ -34,9 +34,9 @@ if (-not $hadMaster -and $script:MemoryFoundIn) {
 }
 
 function Show-AdminWarn {
+    # opened in a terminal that was already admin: say so once, in green, when guard opens
     if ($script:AdminWarn) {
-        Write-Host "warning   this terminal already had admin rights before guard opened." -ForegroundColor Yellow
-        Write-Host "          if an AI agent runs in it, it can unlock files. use a normal terminal for agents." -ForegroundColor Yellow
+        Write-Host ("admin     running as administrator  {0}  no prompt needed" -f [char]0x00B7) -ForegroundColor Green
         Write-Host ""
     }
 }
@@ -71,7 +71,6 @@ function Prompt-Loop {
             break
         }
         Show-Status
-        Show-AdminWarn
     }
 }
 
