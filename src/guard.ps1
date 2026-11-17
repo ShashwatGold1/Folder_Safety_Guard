@@ -53,10 +53,14 @@ function Prompt-Loop {
         catch {
             # never die halfway through a command: say what broke and how to report it
             $cont = $true
-            Write-Host ("  FAIL  {0}" -f $_.Exception.Message) -ForegroundColor Red
-            Write-Host ("        at {0}" -f (($_.ScriptStackTrace -split "`n")[0])) -ForegroundColor DarkGray
-            Write-Host  "        something unexpected went wrong. please report it, with the lines above:"
-            Write-Host  "        https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" -ForegroundColor Cyan
+            $msg = $_.Exception.Message; $at = (($_.ScriptStackTrace -split "`n")[0])
+            Write-Host ("  FAIL  {0}" -f $msg) -ForegroundColor Red
+            Write-Host ("        at {0}" -f $at) -ForegroundColor DarkGray
+            Write-Host  "        something unexpected went wrong in the middle of that command."
+            Write-Host  "        type  resume  to make sure everything is locked again."
+            $url = New-GuardIssueUrl -Command $raw -Message $msg -Where $at
+            if (Open-GuardIssue $url) { Write-Host "        a GitHub issue opened in your browser, filled in. check it, then press Submit." }
+            else { Write-Host "        please report it here:" ; Write-Host "        https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" -ForegroundColor Cyan }
         }
         if (-not $cont) {
             $c = $raw.Trim().ToLower()

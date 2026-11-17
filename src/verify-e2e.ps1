@@ -95,6 +95,8 @@ New-Item -ItemType Directory $B -Force | Out-Null
 'a1' | Set-Content "$A\amazon-checkout.png"; 'a2' | Set-Content "$A\godaddy-dns.png"; 'a3' | Set-Content "$A\sub\inner.png"
 'a4' | Set-Content "$A\amazon-2.png"; 'a5' | Set-Content "$A\amazon-3.png"
 'ro' | Set-Content "$A\readonly.png"; (Get-Item "$A\readonly.png").IsReadOnly = $true
+New-Item -ItemType Directory "$A\pics", "$A\old" -Force | Out-Null
+'p1' | Set-Content "$A\pics\p1.png"; 'p2' | Set-Content "$A\pics\p2.png"; 'o' | Set-Content "$A\old\o.png"
 'b1' | Set-Content "$B\tax-2025.pdf"; 'b2' | Set-Content "$B\invoice.pdf"
 
 # ---------------------------------------------------------------------------
@@ -220,6 +222,37 @@ $o = Out-Of 'delete zzzz'
 Check 'no match: says so' ($o -match 'no file matches')
 
 # ---------------------------------------------------------------------------
+Section 'folders inside: list, delete, copy, cut'
+function Q { $script:InputQueue = New-Object System.Collections.Queue; foreach ($a in $args) { $script:InputQueue.Enqueue([string]$a) } }
+Invoke-GuardCommand 'use 1' 6>&1 | Out-Null
+$out = Join-Path $env:TEMP ('guard-out-' + [guid]::NewGuid().ToString('N'))
+$o = Out-Of 'list'
+Check 'list shows subfolders as folders' (($o -match 'pics\s+\S+ \S+\s+folder') -and ($o -match 'pics\\p1\.png'))
+Check 'subfolder pics locked' ((IsLocked "$A\pics") -and (IsLocked "$A\pics\p1.png"))
+Q 1; Invoke-GuardCommand 'delete old' 6>&1 | Out-Null
+Check 'delete a folder: gone with what was inside' (-not (Test-Path "$A\old"))
+Q $out 1 2; $o = Out-Of 'move p1'
+Check 'copy a file out: copy is there' (Test-Path "$out\p1.png")
+Check 'copy is yours: owner you, no lock' (((OwnerOf "$out\p1.png") -match 'ojhas') -and -not (IsLocked "$out\p1.png"))
+Check 'original still protected' ((Test-Path "$A\pics\p1.png") -and (IsLocked "$A\pics\p1.png"))
+Q $out 1; $o = Out-Of 'move pics'
+Check 'cut a folder out: moved with its files' ((Test-Path "$out\pics\p2.png") -and -not (Test-Path "$A\pics"))
+Check 'cut folder is yours: owner you, no locks' (((OwnerOf "$out\pics") -match 'ojhas') -and ((OwnerOf "$out\pics\p2.png") -match 'ojhas') -and -not (IsLocked "$out\pics") -and -not (IsLocked "$out\pics\p2.png"))
+$gone = $true; try { Remove-Item $out -Recurse -Force -ErrorAction Stop } catch { $gone = $false }
+Check 'moved-out items delete normally' $gone
+Q "$A\sub"; $o = Out-Of 'move checkout'
+Check 'move into the protected folder itself refused' ($o -match 'pick a folder outside')
+Q 'no'; $o = Out-Of 'move all'
+Check 'move all: anything but YES cancels' (($o -match 'cancelled') -and (Test-Path "$A\amazon-checkout.png"))
+Q 2; Check 'menu fallback: typed number' ((Select-Menu @('cut','copy') 6>$null) -eq 2)
+Q copy; Check 'menu fallback: typed word' ((Select-Menu @('cut','copy') 6>$null) -eq 2)
+$url = New-GuardIssueUrl -Command 'delete x' -Message 'boom happened' -Where 'at Cmd-Delete'
+Check 'error report: pre-filled GitHub issue link' (($url -like 'https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new?title=guard%20error%3A%20boom*') -and ($url -match 'body=.*boom%20happened'))
+$env:GUARD_NOBROWSER = '1'
+Check 'error report: browser not opened in tests' (-not (Open-GuardIssue $url))
+$env:GUARD_NOBROWSER = ''
+
+# ---------------------------------------------------------------------------
 Section 'move folder'
 Invoke-GuardCommand 'use 2' 6>&1 | Out-Null
 $B2 = Join-Path $root 'Beta-moved'
@@ -270,6 +303,12 @@ $r = @(); if (Test-Path $log) { $r = Get-Content $log }; $r | ForEach-Object { W
 Check 'agent''s own subfolder: no delete inside, no Full Control' (($r -contains 'del-inner: blocked') -and ($r -contains 'grant-F: blocked'))
 Remove-Item $mk, $log -Force -EA SilentlyContinue
 Invoke-GuardCommand "use 3" 6>&1 | Out-Null
+New-Item -ItemType Directory "$G\deep" -Force | Out-Null; 'd' | Set-Content "$G\deep\d.png"
+WaitFor { IsLocked "$G\deep\d.png" } 10 | Out-Null
+Q YES; $o = Out-Of 'delete all'
+$left = @(Get-ChildItem $G -Force | Where-Object { $_.Name -ne '_guard.json' })
+Check 'delete all: empties the folder, subfolders too' ($left.Count -eq 0)
+Check 'delete all: folder itself still there and locked' ((Test-Path $G) -and (IsLocked $G))
 Invoke-GuardCommand 'remove' 6>&1 | Out-Null
 $gone = $true; try { Remove-Item $G -Recurse -Force -ErrorAction Stop } catch { $gone = $false }
 Check 'remove: drive-root folder deletes normally again' ($gone -and -not (Test-Path $G))

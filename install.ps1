@@ -8,6 +8,7 @@ param(
     [string]$ForUser = '',          # which account to protect for; blank = the signed-in user
     [switch]$Update,                # called by  guard> update
     [string]$From = '',             # old version, for the update header
+    [string]$To = '',               # new version, for the update header
     [switch]$Pause                  # keep the UAC window open at the end
 )
 
@@ -32,12 +33,32 @@ if (Test-InstallTestMode) {
     if ($env:GUARD_TASK) { $taskName = $env:GUARD_TASK }
     if (-not $Source -and $env:GUARD_SOURCE) { $Source = $env:GUARD_SOURCE }
 }
-function StepOk([string]$name,[string]$detail){ Write-Host ("  ok    {0,-9}  {1}" -f $name,$detail) -ForegroundColor Green }
-function StepFail([string]$name,[string]$detail){ Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red }
-function Bar([string]$what,[int]$n,[int]$tot) {
-    $w = 30; $fill = [int]($w * $n / $tot)
-    Write-Host ("guard  {0}   [{1}]  {2,3}%   {3}/{4}" -f $what, (('=' * $fill) + ('-' * ($w - $fill))), [int](100*$n/$tot), $n, $tot)
+# progress bar on top, redrawn in place after every step (plain lines when output is redirected)
+$script:BarTop = -1; $script:BarWhat = 'installing'; $script:StepN = 0; $script:StepTotal = 8
+function Bar-Text([int]$n) {
+    $w = 30; $fill = [int]($w * $n / $script:StepTotal)
+    return ("guard  {0}   [{1}]  {2,3}%   {3}/{4}" -f $script:BarWhat, (('=' * $fill) + ('-' * ($w - $fill))), [int](100*$n/$script:StepTotal), $n, $script:StepTotal)
 }
+function Bar-Start {
+    Write-Host ""
+    try { if (-not [Console]::IsOutputRedirected) { $script:BarTop = [Console]::CursorTop } } catch { $script:BarTop = -1 }
+    if ($script:BarTop -ge 0) { Write-Host (Bar-Text 0) }
+    Write-Host ""
+}
+function Bar-Set {
+    if ($script:BarTop -lt 0) { return }
+    try {
+        $l = [Console]::CursorLeft; $t = [Console]::CursorTop
+        [Console]::SetCursorPosition(0, $script:BarTop); Write-Host -NoNewline (Bar-Text $script:StepN)
+        [Console]::SetCursorPosition($l, $t)
+    } catch { $script:BarTop = -1 }
+}
+function Bar-End {
+    # redirected output (tests, logs): the bar once, at the end
+    if ($script:BarTop -lt 0) { Write-Host ""; Write-Host (Bar-Text $script:StepTotal) }
+}
+function StepOk([string]$name,[string]$detail){ Write-Host ("  ok    {0,-9}  {1}" -f $name,$detail) -ForegroundColor Green; $script:StepN++; Bar-Set }
+function StepFail([string]$name,[string]$detail){ Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red }
 function Done-Pause { if ($Pause) { Write-Host ""; Read-Host "  press Enter to close" | Out-Null } }
 function Fail-Out([string]$problem,[string]$fix) {
     Write-Host ""
@@ -68,12 +89,16 @@ if (-not (Is-Admin) -and -not $NoElevate) {
 }
 
 $u = $ForUser; if (-not $u) { $u = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
-$total = 8
-Write-Host ""
+if ($Update) {
+    $f = $From; if (-not $f) { $f = '?' }; $t2 = $To; if (-not $t2) { $t2 = 'new' }
+    $script:BarWhat = "updating $f → $t2"
+}
+Bar-Start
 
 # 1 check
 if ($PSVersionTable.PSVersion.Major -lt 5) { StepFail 'check' 'needs PowerShell 5 or newer'; Fail-Out 'PowerShell is too old' 'install Windows Management Framework 5.1, then run the install line again'; return }
-StepOk 'check' ("PowerShell {0}  ·  {1}  ·  user {2}" -f $PSVersionTable.PSVersion, [Environment]::OSVersion.VersionString, ($u -split '\\')[-1])
+$win = 'Windows 10'; if ([Environment]::OSVersion.Version.Build -ge 22000) { $win = 'Windows 11' }
+StepOk 'check' ("PowerShell {0}.{1}  ·  {2}  ·  user {3}" -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor, $win, ($u -split '\\')[-1])
 
 # 2 uac
 $uac = 1; try { $uac = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA } catch {}
@@ -161,8 +186,7 @@ if ($Update) {
     }
 }
 
-Write-Host ""
-if ($Update) { Bar ("updating {0} -> {1}" -f $From, $script:GuardVersion) $total $total } else { Bar 'installing' $total $total }
+Bar-End
 Write-Host ""
 if ($Update) { Write-Host "  updated successfully." -ForegroundColor Green; Done-Pause; return }
 Write-Host "  installed successfully." -ForegroundColor Green
