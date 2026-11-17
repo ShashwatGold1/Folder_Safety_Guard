@@ -1,4 +1,4 @@
-﻿# Resume â€” test status
+﻿# Resume — test status
 
 All of guard is built and verified on this PC (2026-11-17, admin session).
 
