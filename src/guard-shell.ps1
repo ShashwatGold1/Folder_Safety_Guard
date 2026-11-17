@@ -24,7 +24,11 @@ function Read-Line([string]$Prompt) {
         Write-Host ($Prompt + $v) -ForegroundColor DarkGray
         return $v
     }
-    return Read-Host -Prompt $Prompt
+    # not Read-Host: it always adds ': ' after the prompt
+    Write-Host -NoNewline $Prompt
+    $v = [Console]::ReadLine()
+    if ($null -eq $v) { return '' }   # input closed = cancel
+    return $v.Trim()
 }
 function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $c }
 function Ok([string]$label, [string]$detail) { Write-Host ("  {0,-9} {1,-40} ok" -f $label, $detail) -ForegroundColor Green }
@@ -282,7 +286,7 @@ function Cmd-Delete($arg) {
         $sz = ($files | Measure-Object Length -Sum).Sum
         Say ""; Say ("  This empties the folder: {0} files, {1:N0} B." -f $files.Count, $sz)
         $a = Read-Line "  type YES to continue, anything else to cancel > "
-        if ($a -cne 'YES') { Say "  cancelled"; return }
+        if ($a -ne 'YES') { Say "  cancelled"; return }
         # top level only: a subfolder goes with everything in it
         $top = @(Get-ChildItem -LiteralPath $f.path -Force -EA SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' })
         $n = 0
@@ -364,7 +368,7 @@ function Cmd-Move($arg) {
         $files = @(Get-ChildItem -LiteralPath $f.path -Force -EA SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' })
         Say ""; Say ("  This copies or cuts everything in the folder: {0} items." -f $files.Count)
         $a = Read-Line "  type YES to continue, anything else to cancel > "
-        if ($a -cne 'YES') { Say "  cancelled"; return }
+        if ($a -ne 'YES') { Say "  cancelled"; return }
     }
     if ($files.Count -eq 0) { Say "  no file matches `"$arg`""; return }
     $dest = Read-Line "  Where to? type a folder path then Enter > "
@@ -484,7 +488,7 @@ function Cmd-Remove($arg) {
     if ($arg -eq 'all') {
         Say ""; Say ("  This stops protecting {0} folders. Nothing is deleted." -f $targets.Count)
         $a = Read-Line "  type YES to continue, anything else to cancel > "
-        if ($a -cne 'YES') { Say "  cancelled"; return }
+        if ($a -ne 'YES') { Say "  cancelled"; return }
     }
     # forget first, so the background guard doesn't lock it again while we unlock
     $keep = @(); foreach ($f in $script:Cfg.folders) { if ($targets -notcontains $f) { $keep += $f } }
@@ -642,7 +646,7 @@ The only way to delete inside a protected folder without unlocking it.
 delete amazon  finds every file and folder with "amazon" in its name. One
 match: asks yes or no. Many: shows a numbered list, type the numbers. A folder
 goes with everything in it. delete all  empties the folder (the folder itself
-stays protected) and needs  YES  typed in capitals. Nothing goes to the
+stays protected) and needs  YES  typed. Nothing goes to the
 Recycle Bin. If something can't be deleted (open in another program), guard
 says FAIL and it stays protected.
 '@
@@ -766,7 +770,7 @@ function Cmd-Uninstall {
     $n = 0; foreach ($f in $folders) { if (Test-Path -LiteralPath $f.path) { $n += @(Get-GuardFiles -Folder $f.path).Count } }
     Say ""; Say ("  This removes guard from this PC. Protected folders: {0}, files: {1}. Nothing is deleted." -f $folders.Count, $n)
     $a = Read-Line "  type YES to continue, anything else to cancel > "
-    if ($a -cne 'YES') { Say "  cancelled"; return $true }
+    if ($a -ne 'YES') { Say "  cancelled"; return $true }
     Say ""
     # 1 stop the background guard first, so nothing locks again behind us
     Stop-GuardWatch -Dir $script:InstallDir | Out-Null
