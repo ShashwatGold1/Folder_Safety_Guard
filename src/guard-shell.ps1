@@ -792,8 +792,12 @@ function Cmd-Uninstall {
     } catch { Say "  FAIL  path: $($_.Exception.Message)" 'Red' }
     # only delete a real install folder (has guard.cmd), never a source checkout
     if (Test-Path -LiteralPath (Join-Path $script:InstallDir 'guard.cmd')) {
-        Remove-Item -LiteralPath $script:InstallDir -Recurse -Force -EA SilentlyContinue
-        Ok "removed" $script:InstallDir
+        # guard.cmd is still running (it started us): remove the folder
+        # 2 s after guard closes, or Windows prints
+        # "The system cannot find the path specified."
+        $dir = $script:InstallDir.TrimEnd('\')
+        Start-Process cmd.exe -WindowStyle Hidden -ArgumentList "/c ping -n 3 127.0.0.1 >nul & rd /s /q `"$dir`""
+        Ok "removed" $dir
     }
     $data = Split-Path $script:GuardConfigPath -Parent
     Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue

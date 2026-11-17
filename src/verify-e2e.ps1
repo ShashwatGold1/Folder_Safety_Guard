@@ -372,7 +372,7 @@ $o = Out-Of 'uninstall'; Write-Host $o -ForegroundColor DarkGray
 Check 'done. bye.' ($o -match 'done\. bye\.')
 Check 'background guard stopped' (WaitFor { @(Watchers).Count -eq 0 } 15)
 Check 'task removed' ($null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
-Check 'Program Files\guard removed' (-not (Test-Path $prefix))
+Check 'Program Files\guard removed' (WaitFor { -not (Test-Path $prefix) } 10)
 Check 'ProgramData\guard removed' (-not (Test-Path "$env:ProgramData\guard"))
 Check 'PATH back exactly as before, still REG_EXPAND_SZ' (((Raw-Path) -eq $rawBefore) -and ((Path-Kind) -eq 'ExpandString'))
 Check 'folders owned by you again' ((OwnerOf $A) -match 'ojhas' -and (OwnerOf "$A\amazon-checkout.png") -match 'ojhas' -and (OwnerOf "$B2\invoice.pdf") -match 'ojhas')
@@ -404,7 +404,7 @@ Check 'remove all: no folders left' ($script:Cfg.folders.Count -eq 0)
 Check 'remove all: _guard.json deleted' (-not (Test-Path "$A\_guard.json") -and -not (Test-Path "$B2\_guard.json"))
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')
 Invoke-GuardCommand 'uninstall' 6>&1 | Out-Null
-Check 'uninstalled again' (-not (Test-Path $prefix) -and $null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
+Check 'uninstalled again' ((WaitFor { -not (Test-Path $prefix) } 10) -and $null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
 $canDel = $true; try { Remove-Item $root -Recurse -Force -ErrorAction Stop } catch { $canDel = $false }
 Check 'test folders delete normally' ($canDel -and -not (Test-Path $root))
 Check 'testing_env has no deny left' (-not (IsLocked (Join-Path $repo 'testing_env')))
