@@ -10,10 +10,13 @@ $script:Editing = @{}   # path -> $true while a folder is in 'edit' (unlocked) s
 
 # ---- input / output -------------------------------------------------------
 function Read-Line([string]$Prompt) {
-    # tests: answers come from a queue, or from $env:GUARD_ANSWERS ("1;YES;...") across processes
-    if (-not $script:InputQueue -and $env:GUARD_ANSWERS) {
+    # tests: answers come from a queue, or from GUARD_ANSWERS ("1;YES;...") across processes.
+    # GUARD_ANSWERS is ignored in an admin process unless an admin set HKLM GUARD_TEST=1, so an
+    # agent can't pre-answer YES prompts with setx.
+    $ans = Get-GuardTestEnv 'GUARD_ANSWERS'
+    if (-not $script:InputQueue -and $ans) {
         $script:InputQueue = New-Object System.Collections.Queue
-        foreach ($x in ($env:GUARD_ANSWERS -split ';')) { $script:InputQueue.Enqueue($x) }
+        foreach ($x in ($ans -split ';')) { $script:InputQueue.Enqueue($x) }
         $env:GUARD_ANSWERS = ''
     }
     if ($script:InputQueue -and $script:InputQueue.Count -gt 0) {
@@ -28,7 +31,23 @@ function Ok([string]$label, [string]$detail) { Write-Host ("  {0,-9} {1,-40} ok"
 
 # ---- helpers --------------------------------------------------------------
 function Cur { if ($script:Cfg.folders.Count -eq 0) { return $null }; return $script:Cfg.folders[$script:Cfg.current] }
+# NB: a function returning a 1-item array hands back the bare item; callers wrap it: @(Folder-Skip $f)
 function Folder-Skip($f) { if ($f.skip) { return @($f.skip) } else { return @() } }
+function Test-GuardPlace([string]$path, [string]$except = '') {
+    # Returns why $path can't be a protected folder, or $null if it can.
+    # Nested protected folders would strip each other's rules, so they are refused.
+    if (-not (Split-Path $path -Parent)) { return "a whole drive can't be protected. pick a folder on it" }
+    foreach ($sys in @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+        if ($sys -and (($path -ieq $sys) -or $path.StartsWith($sys.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) { return "Windows and program folders can't be protected: $sys" }
+    }
+    foreach ($o in $script:Cfg.folders) {
+        if ($except -and ($o.path -ieq $except)) { continue }
+        $op = $o.path.TrimEnd('\') + '\'; $pp = $path.TrimEnd('\') + '\'
+        if ($pp.StartsWith($op, [StringComparison]::OrdinalIgnoreCase)) { return "already protected as part of $($o.path)" }
+        if ($op.StartsWith($pp, [StringComparison]::OrdinalIgnoreCase)) { return "this folder holds the protected folder $($o.path). remove that one first, then init here" }
+    }
+    return $null
+}
 function Test-AboveShared($f) {
     # true if another locked protected folder sits in the same folder above (it still needs that rule)
     $above = Split-Path $f.path -Parent
@@ -190,27 +209,36 @@ function Cmd-Delete($arg) {
         Say ""; Say ("  This empties the folder: {0} files, {1:N0} B." -f $files.Count, $sz)
         $a = Read-Line "  type YES to continue, anything else to cancel > "
         if ($a -cne 'YES') { Say "  cancelled"; return }
-        foreach ($x in $files) { Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null; Remove-Item -LiteralPath $x.FullName -Force -EA SilentlyContinue }
-        Ok "deleted" ("{0} files" -f $files.Count); return
+        $n = 0
+        foreach ($x in $files) { if (Remove-GuardedFile $f $x) { $n++ } }
+        Ok "deleted" ("{0} of {1} files" -f $n, @($files).Count); return
     }
-    $matches = @(Find-Matches $f $arg)
-    if ($matches.Count -eq 0) { Say "  no file matches `"$arg`"  ·  type  list  to see names"; return }
+    # (not $matches: that is PowerShell's automatic variable, and -match below would overwrite it)
+    $hits = @(Find-Matches $f $arg)
+    if ($hits.Count -eq 0) { Say "  no file matches `"$arg`"  ·  type  list  to see names"; return }
     $chosen = @()
-    if ($matches.Count -eq 1) { $chosen = $matches }
+    if ($hits.Count -eq 1) { $chosen = $hits }
     else {
         Say ""; Say "  Which files?"
-        $i = 1; foreach ($m in $matches) { Say ("  {0,3}  {1,-28} {2:yyyy-MM-dd HH:mm}" -f $i, $m.Name, $m.LastWriteTime); $i++ }
+        $i = 1; foreach ($m in $hits) { Say ("  {0,3}  {1,-28} {2:yyyy-MM-dd HH:mm}" -f $i, $m.Name, $m.LastWriteTime); $i++ }
         $a = Read-Line "  type numbers (e.g. 1 3), all, or n > "
-        if ($a -eq 'all') { $chosen = $matches }
+        if ($a -eq 'all') { $chosen = $hits }
         elseif ($a -match '^(n|no)?$') { Say "  cancelled"; return }
-        else { foreach ($n in ($a -split '\s+')) { if ($n -match '^\d+$' -and [int]$n -ge 1 -and [int]$n -le $matches.Count) { $chosen += $matches[[int]$n-1] } } }
+        else { foreach ($n in ($a -split '\s+')) { if ($n -match '^\d+$' -and [int]$n -ge 1 -and [int]$n -le $hits.Count) { $chosen += $hits[[int]$n-1] } } }
     }
     if ($chosen.Count -eq 0) { Say "  nothing chosen"; return }
     if (-not (Confirm-YesNo ("Delete {0} file(s)?" -f $chosen.Count))) { Say "  cancelled"; return }
-    foreach ($x in $chosen) {
-        Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null
-        Remove-Item -LiteralPath $x.FullName -Force -EA SilentlyContinue
-        Ok "deleted" $x.Name
+    foreach ($x in $chosen) { if (Remove-GuardedFile $f $x) { Ok "deleted" $x.Name } }
+}
+
+function Remove-GuardedFile($f, $x) {
+    # Unlock, delete. If the delete fails (open in Word, path too long...), lock it again and say so.
+    Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null
+    try { Remove-Item -LiteralPath $x.FullName -Force -ErrorAction Stop; return $true }
+    catch {
+        Lock-GuardFile -Path $x.FullName -User $script:User -Skip (Folder-Skip $f) -Force | Out-Null
+        Say ("  FAIL  {0}  not deleted, still protected  ·  {1}" -f $x.Name, $_.Exception.Message) 'Red'
+        return $false
     }
 }
 
@@ -222,6 +250,8 @@ function Cmd-Move($arg) {
         # an existing folder = move inside it, keeping the name
         if (Test-Path -LiteralPath $dest -PathType Container) { $dest = Join-Path $dest (Get-FolderName $f.path) }
         if (Test-Path -LiteralPath $dest) { Say "  already exists: $dest" 'Red'; return }
+        $bad = Test-GuardPlace $dest $f.path
+        if ($bad) { Say "  $bad" 'Red'; return }
         $old = $f.path
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $true -Force
         Save-GuardConfig -Config $script:Cfg -User $script:User      # background guard: hands off
@@ -243,7 +273,12 @@ function Cmd-Move($arg) {
         return
     }
     $files = @(Find-Matches $f $arg)
-    if ($arg -eq 'all') { $files = @(Get-GuardFiles -Folder $f.path) }
+    if ($arg -eq 'all') {
+        $files = @(Get-GuardFiles -Folder $f.path)
+        Say ""; Say ("  This copies or cuts every file in the folder: {0} files." -f $files.Count)
+        $a = Read-Line "  type YES to continue, anything else to cancel > "
+        if ($a -cne 'YES') { Say "  cancelled"; return }
+    }
     if ($files.Count -eq 0) { Say "  no file matches `"$arg`""; return }
     $dest = Read-Line "  Where to? type a folder path then Enter > "
     if (-not $dest) { Say "  cancelled"; return }
@@ -254,8 +289,18 @@ function Cmd-Move($arg) {
     $cc = Read-Line "  type 1 or 2 then Enter > "
     $cut = ($cc -eq '1' -or $cc -match '^cut$')
     foreach ($x in $files) {
-        if ($cut) { Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null; Move-Item -LiteralPath $x.FullName -Destination $dest -Force -EA SilentlyContinue; Ok "moved" $x.Name }
-        else      { Copy-Item -LiteralPath $x.FullName -Destination $dest -Force -EA SilentlyContinue; Ok "copied" $x.Name }
+        if ($cut) {
+            Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null
+            try { Move-Item -LiteralPath $x.FullName -Destination $dest -Force -ErrorAction Stop; Ok "moved" $x.Name }
+            catch {
+                # still here: lock it again, say so
+                if (Test-Path -LiteralPath $x.FullName) { Lock-GuardFile -Path $x.FullName -User $script:User -Skip (Folder-Skip $f) -Force | Out-Null }
+                Say ("  FAIL  {0}  not moved, still protected  ·  {1}" -f $x.Name, $_.Exception.Message) 'Red'
+            }
+        } else {
+            try { Copy-Item -LiteralPath $x.FullName -Destination $dest -Force -ErrorAction Stop; Ok "copied" $x.Name }
+            catch { Say ("  FAIL  {0}  not copied  ·  {1}" -f $x.Name, $_.Exception.Message) 'Red' }
+        }
     }
 }
 
@@ -301,6 +346,8 @@ function Cmd-Init($arg) {
     if (-not $path) { Say "  not found: $arg" 'Red'; return }
     if (-not (Test-Path -LiteralPath $path -PathType Container)) { Say "  not a folder: $path" 'Red'; return }
     foreach ($f in $script:Cfg.folders) { if ($f.path -eq $path) { Say "  already protected  ·  type  use"; return } }
+    $bad = Test-GuardPlace $path
+    if ($bad) { Say "  $bad" 'Red'; return }
     # a folder that carries guard memory from an earlier install: offer to restore its whole list
     $mem = Read-GuardJson -Path (Join-Path $path '_guard.json')
     if ($mem -and $mem.folders -and @($mem.folders).Count -gt 0) {
@@ -366,7 +413,7 @@ function Cmd-Skip($arg) {
     if (-not $arg) {
         Say ""; Say ("  skip list for {0}" -f $f.name)
         Say ("    built-in   " + ($script:BuiltinSkip -join '  '))
-        $yours = Folder-Skip $f; if ($yours.Count -eq 0) { $yours = @('—') }
+        $yours = @(Folder-Skip $f); if ($yours.Count -eq 0) { $yours = @('—') }
         Say ("    yours      " + ($yours -join '  ')); Say ""
         return
     }
@@ -377,11 +424,14 @@ function Cmd-Skip($arg) {
         Ok "removed" $parts[1]; return
     }
     if ($parts[0] -eq 'all' -and $parts.Count -eq 2) {
-        foreach ($x in $script:Cfg.folders) { $x.skip = @((Folder-Skip $x) + $parts[1] | Select-Object -Unique) }
+        foreach ($x in $script:Cfg.folders) {
+            $x.skip = @(@(Folder-Skip $x) + @($parts[1]) | Select-Object -Unique)
+            if (Test-Path -LiteralPath $x.path) { foreach ($y in (Get-GuardFiles -Folder $x.path)) { if ($y.Name -like $parts[1]) { Unlock-GuardFile -Path $y.FullName -User $script:User | Out-Null } } }
+        }
         Save-GuardConfig -Config $script:Cfg -User $script:User
         Ok "added" ("{0} to all folders" -f $parts[1]); return
     }
-    $f.skip = @((Folder-Skip $f) + $arg | Select-Object -Unique)
+    $f.skip = @(@(Folder-Skip $f) + @($arg) | Select-Object -Unique)
     # unlock anything already locked that now matches
     foreach ($x in (Get-GuardFiles -Folder $f.path)) { if ($x.Name -like $arg) { Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null } }
     Save-GuardConfig -Config $script:Cfg -User $script:User
@@ -609,10 +659,8 @@ function Cmd-Uninstall {
     # 3 task, path, program, data
     try { Unregister-ScheduledTask -TaskName $script:GuardTask -Confirm:$false -ErrorAction Stop; Ok "removed" ("task `"{0}`"" -f $script:GuardTask) } catch { Ok "removed" "task (was not there)" }
     try {
-        $mp = [Environment]::GetEnvironmentVariable('Path','Machine')
-        $parts = @($mp -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ne $script:InstallDir.TrimEnd('\')) })
-        [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'Machine')
-        Ok "removed" "path entry"
+        # raw registry value: keeps %SystemRoot% etc. as they are (REG_EXPAND_SZ)
+        if (Remove-GuardMachinePath $script:InstallDir) { Ok "removed" "path entry" } else { Ok "removed" "path entry (was not there)" }
     } catch { Say "  FAIL  path: $($_.Exception.Message)" 'Red' }
     # only delete a real install folder (has guard.cmd), never a source checkout
     if (Test-Path -LiteralPath (Join-Path $script:InstallDir 'guard.cmd')) {

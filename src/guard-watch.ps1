@@ -11,7 +11,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\guard-core.ps1"
 . "$here\guard-config.ps1"
 
-if (-not $User) { $User = $env:GUARD_USER }
+if (-not $User) { $User = Get-GuardTestEnv 'GUARD_USER' }
 if (-not $User) { try { $User = Get-GuardUser } catch { } }
 
 $dataDir    = Split-Path $script:GuardConfigPath -Parent
@@ -138,7 +138,7 @@ Write-WatchStatus "watching $($script:Watchers.Count) folders"
 
 $tick = 0.7; $sinceSweep = 0.0; $sinceBeat = 0.0
 $sinceUpdate = 21600.0 - 60   # first update check one minute after start, then every 6 hours
-while ($true) {
+while ($true) { try {
     Start-Sleep -Milliseconds 700
 
     # config changed (init / remove / edit / resume / move folder)? checked every tick, before
@@ -201,4 +201,11 @@ while ($true) {
         $sinceSweep = 0
         $needFull = -not (Full-Check $cfg)    # stopped early by a config change -> retry after reload
     }
-}
+} catch {
+    # one bad moment (a file vanished mid-lock...) must not end the background guard:
+    # write it down (log kept under 1 MB), catch up with a full check, keep going
+    try { if ((Get-Item -LiteralPath $errorFile -EA Stop).Length -gt 1MB) { Remove-Item -LiteralPath $errorFile -Force } } catch { }
+    try { "{0:o}  {1}`r`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace | Add-Content -LiteralPath $errorFile } catch { }
+    $needFull = $true
+    Start-Sleep -Seconds 2
+} }

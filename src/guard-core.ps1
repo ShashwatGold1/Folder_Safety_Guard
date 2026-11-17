@@ -5,16 +5,75 @@ $ErrorActionPreference = 'Stop'
 
 $script:GuardVersion = '1.0'
 $script:GuardRepo    = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
-$script:GuardTask    = 'guard'; if ($env:GUARD_TASK) { $script:GuardTask = $env:GUARD_TASK }
 $script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
+$script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+
+function Test-GuardTestMode {
+    # Test overrides (GUARD_CONFIG, GUARD_SOURCE, GUARD_TASK, GUARD_ANSWERS, GUARD_USER) are read
+    # from the environment ONLY when that can't help an attacker:
+    #  - in a process without admin rights (it can't do anything the caller couldn't), or
+    #  - when an administrator set GUARD_TEST=1 machine-wide (HKLM, read directly).
+    # A limited agent can set user env vars (setx) that elevated processes inherit, but not HKLM.
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $admin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $admin) { return $true }
+    $k = $null
+    try { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:EnvKey); return ([string]$k.GetValue('GUARD_TEST', '') -eq '1') }
+    catch { return $false } finally { if ($k) { $k.Close() } }
+}
+function Get-GuardTestEnv([string]$Name) {
+    $v = [Environment]::GetEnvironmentVariable($Name)
+    if (-not $v) { return $null }
+    if (Test-GuardTestMode) { return $v }
+    return $null
+}
+
+$script:GuardTask = 'guard'; $t = Get-GuardTestEnv 'GUARD_TASK'; if ($t) { $script:GuardTask = $t }
+
+# ---- machine PATH: read and write the raw value, so %SystemRoot% and friends survive ----------
+function Get-GuardMachinePath {
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:EnvKey)
+    try { return [string]$k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $k.Close() }
+}
+function Set-GuardMachinePath([string]$Value) {
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:EnvKey, $true)
+    try { $k.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString) } finally { $k.Close() }
+    Send-GuardEnvChange
+}
+function Send-GuardEnvChange {
+    # tell Explorer (and new terminals it starts) that the environment changed
+    try {
+        if (-not ('GuardNative.Env' -as [type])) {
+            Add-Type -Namespace GuardNative -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, string l, uint f, uint t, out UIntPtr r);'
+        }
+        $r = [UIntPtr]::Zero
+        [GuardNative.Env]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 3000, [ref]$r) | Out-Null
+    } catch { }
+}
+function Test-GuardPathHas([string]$Raw, [string]$Dir) {
+    foreach ($p in ($Raw -split ';')) { if ($p -and ($p.TrimEnd('\') -ieq $Dir.TrimEnd('\'))) { return $true } }
+    return $false
+}
+function Add-GuardMachinePath([string]$Dir) {
+    $raw = Get-GuardMachinePath
+    if (Test-GuardPathHas $raw $Dir) { return $false }
+    Set-GuardMachinePath ($raw.TrimEnd(';') + ';' + $Dir); return $true
+}
+function Remove-GuardMachinePath([string]$Dir) {
+    $raw = Get-GuardMachinePath
+    if (-not (Test-GuardPathHas $raw $Dir)) { return $false }
+    $keep = @($raw -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ine $Dir.TrimEnd('\')) })
+    Set-GuardMachinePath ($keep -join ';'); return $true
+}
 
 function Get-GuardSourceText {
-    # Text of one file from the newest guard: GitHub, or $env:GUARD_SOURCE (a local folder) in tests.
+    # Text of one file from the newest guard: GitHub, or GUARD_SOURCE (a local folder) in tests.
     # install.ps1 sits in the repo root, everything else in src/.
     param([string]$Name)
-    if ($env:GUARD_SOURCE) {
-        $p = Join-Path $env:GUARD_SOURCE $Name
-        if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path (Split-Path $env:GUARD_SOURCE -Parent) $Name }
+    $srcDir = Get-GuardTestEnv 'GUARD_SOURCE'
+    if ($srcDir) {
+        $p = Join-Path $srcDir $Name
+        if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path (Split-Path $srcDir -Parent) $Name }
         return Get-Content -LiteralPath $p -Raw -Encoding UTF8 -ErrorAction Stop
     }
     $sub = 'src/'; if ($Name -eq 'install.ps1') { $sub = '' }
@@ -85,9 +144,11 @@ function Test-GuardSkip {
 
 function Test-GuardBusy {
     # True if the file is open in another program (can't change its ACL cleanly).
+    # Read access + share None: fails only if another program has it open. (ReadWrite would also
+    # fail on every read-only file, and those would then never be locked.)
     param([string]$Path)
     try {
-        $fs = [IO.File]::Open($Path, 'Open', 'ReadWrite', 'None')
+        $fs = [IO.File]::Open($Path, 'Open', 'Read', 'None')
         $fs.Close(); $fs.Dispose()
         return $false
     } catch { return $true }
@@ -95,18 +156,21 @@ function Test-GuardBusy {
 
 function Invoke-Icacls {
     # Pass args as a plain array; PowerShell quotes each for us. Never add quotes by hand.
+    # Errors come back in the result, never as an exception: in PowerShell 5.1 icacls's stderr,
+    # redirected under ErrorActionPreference=Stop, would throw and kill the shell or the watcher.
     param([string[]]$IcaclsArgs)
-    $out = & icacls.exe @IcaclsArgs 2>&1
+    $ErrorActionPreference = 'Continue'
+    $out = & icacls.exe @IcaclsArgs 2>&1 | ForEach-Object { "$_" }
     return [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Code = $LASTEXITCODE; Out = ($out -join "`n") }
 }
 
 function Lock-GuardFile {
     # Deny delete on one file for the guard user. Skips temp/busy files.
-    param([string]$Path, [string]$User, [string[]]$Skip = @())
+    # -Force: lock even if open (used to put a lock back after a delete/move that failed)
+    param([string]$Path, [string]$User, [string[]]$Skip = @(), [switch]$Force)
     $name = Split-Path $Path -Leaf
     if (Test-GuardSkip -Name $name -Extra $Skip) { return [pscustomobject]@{ Path=$Path; State='skipped'; Reason='skip-list' } }
-    if ($name -like '_guard.json') { } # the memory file is locked like any other
-    if (Test-GuardBusy -Path $Path)  { return [pscustomobject]@{ Path=$Path; State='waiting'; Reason='open in another program' } }
+    if (-not $Force -and (Test-GuardBusy -Path $Path)) { return [pscustomobject]@{ Path=$Path; State='waiting'; Reason='open in another program' } }
     if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
     $r = Invoke-Icacls @($Path, '/deny', ($User+':(DE)'))
     if ($r.Ok) { return [pscustomobject]@{ Path=$Path; State='locked' } }
@@ -135,6 +199,21 @@ function Set-GuardOwnerSystem {
     # read, write, add files, but no permission changes and no take-ownership.
     $r2 = Invoke-Icacls @($Folder, '/inheritance:d')
     $r3 = Invoke-Icacls @($Folder, '/remove:g', $User, '/T', '/C')
+    # Broad grants copied from above can carry Full Control (= change permissions, delete inside):
+    # CREATOR OWNER:F on a drive root gives every new item's creator Full Control, and a group
+    # the user is in (Everyone, Users, Authenticated Users, INTERACTIVE) may hold F or M.
+    # Remove them all; groups that could see the folder before get read-only back.
+    $broad = @('S-1-3-0','S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-4')
+    $had = @()
+    try {
+        foreach ($a in (Get-Acl -LiteralPath $Folder).Access) {
+            if ($a.AccessControlType -ne 'Allow') { continue }
+            try { $sid = $a.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { continue }
+            if (($broad -contains $sid) -and ($had -notcontains $sid)) { $had += $sid }
+        }
+    } catch { }
+    foreach ($sid in $broad) { Invoke-Icacls @($Folder, '/remove:g', "*$sid", '/T', '/C') | Out-Null }
+    foreach ($sid in $had) { if ($sid -ne 'S-1-3-0') { Invoke-Icacls @($Folder, '/grant', "*${sid}:(OI)(CI)RX") | Out-Null } }
     $r4 = Invoke-Icacls @($Folder, '/grant', ($User+':(OI)(CI)M'))
     # OWNER RIGHTS = Modify: files the user creates can't have their lock changed by the user either
     $r5 = Invoke-Icacls @($Folder, '/grant', '*S-1-3-4:(OI)(CI)M')
@@ -182,10 +261,11 @@ function Get-GuardFiles {
 }
 
 function Lock-GuardSubfolder {
-    # A subfolder can't be renamed or moved out (DE). Its files are locked one by one.
+    # A subfolder can't be renamed or moved out (DE) and can't delete what is inside it (DC).
+    # Its files are locked one by one too.
     param([string]$Path, [string]$User)
     if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
-    return (Invoke-Icacls @($Path, '/deny', ($User+':(DE)'))).Ok
+    return (Invoke-Icacls @($Path, '/deny', ($User+':(DE,DC)'))).Ok
 }
 
 function Get-GuardSubfolders {

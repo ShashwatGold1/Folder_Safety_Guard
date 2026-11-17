@@ -4,7 +4,11 @@ $ErrorActionPreference = 'Continue'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfgDir = Join-Path $env:TEMP ('guardag-' + [guid]::NewGuid().ToString('N'))
 $env:GUARD_CONFIG = Join-Path $cfgDir 'config.json'
+# admin process: guard honours GUARD_CONFIG only with HKLM GUARD_TEST=1 (removed at the end)
+$envKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey, $true); $k.SetValue('GUARD_TEST', '1'); $k.Close()
 . "$src\guard-shell.ps1"
+$ErrorActionPreference = 'Continue'
 $root   = 'C:\Users\ojhas\Desktop\Folder_Safety_Guard\testing_env'
 $folder = Join-Path $root 'owntest'
 $user   = Get-GuardUser
@@ -61,6 +65,7 @@ Check 'folder deletes normally after remove' $canDelF
 icacls $root /reset *> $null
 Remove-Item (Join-Path $root 'attack1.log'),(Join-Path $root 'attack2.log') -Force -EA SilentlyContinue
 Remove-Item $cfgDir -Recurse -Force -EA SilentlyContinue
+$k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey, $true); $k.DeleteValue('GUARD_TEST', $false); $k.Close()
 
 $color='Green'; if($fail){$color='Red'}
 Write-Host "`n$pass passed, $fail failed" -ForegroundColor $color

@@ -1,7 +1,9 @@
 ﻿# guard.ps1 — entry point. Self-elevates (UAC once), then runs the interactive shell.
 #   -Elevated   set by guard itself on the relaunch after the UAC click
 #   -NoElevate  tests only: run in this process as-is
-param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '')
+#   -ForUser    the signed-in user, captured BEFORE the UAC click: a standard account elevates
+#               as a different (admin) account, and the locks must be for the real user
+param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '')
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
@@ -12,7 +14,8 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     # the elevated window starts in System32 and gets no env from us: pass the folder along
     $cwd = (Get-Location).ProviderPath; if ($cwd.EndsWith('\')) { $cwd += '.' }   # "C:\" would escape the quote
-    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Cwd `"$cwd`""
+    $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Cwd `"$cwd`" -ForUser `"$me`""
     try { Start-Process powershell.exe -Verb RunAs -ArgumentList $psi }
     catch { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red }
     return
@@ -22,7 +25,7 @@ if ($Cwd) { try { Set-Location -LiteralPath $Cwd -ErrorAction Stop } catch { } }
 # opened straight inside a terminal that was already admin: agents in it could unlock files
 $script:AdminWarn = ((Test-GuardAdmin) -and -not $Elevated -and -not $NoElevate)
 
-$script:User = Get-GuardUser
+$script:User = $ForUser; if (-not $script:User) { $script:User = Get-GuardUser }
 $hadMaster = Test-Path -LiteralPath $script:GuardConfigPath
 $script:Cfg  = Load-GuardConfig
 if (-not $hadMaster -and $script:MemoryFoundIn) {
@@ -46,7 +49,15 @@ function Prompt-Loop {
     Show-AdminWarn
     while ($true) {
         $raw = Read-Host "guard"
-        $cont = Invoke-GuardCommand $raw
+        try { $cont = Invoke-GuardCommand $raw }
+        catch {
+            # never die halfway through a command: say what broke and how to report it
+            $cont = $true
+            Write-Host ("  FAIL  {0}" -f $_.Exception.Message) -ForegroundColor Red
+            Write-Host ("        at {0}" -f (($_.ScriptStackTrace -split "`n")[0])) -ForegroundColor DarkGray
+            Write-Host  "        something unexpected went wrong. please report it, with the lines above:"
+            Write-Host  "        https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" -ForegroundColor Cyan
+        }
         if (-not $cont) {
             $c = $raw.Trim().ToLower()
             if ($c -eq 'exit') { Write-Host "  background guard keeps running. type  guard  to come back." }

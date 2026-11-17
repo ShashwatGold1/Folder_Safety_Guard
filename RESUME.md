@@ -1,4 +1,4 @@
-# Resume — test status
+﻿# Resume â€” test status
 
 All of guard is built and verified on this PC (2026-11-17, admin session).
 
@@ -9,7 +9,7 @@ All of guard is built and verified on this PC (2026-11-17, admin session).
 | `src\test-shell.ps1` | no | 16 / 16 |
 | `src\test-watch.ps1` | no | 2 / 2 |
 | `src\verify-agent.ps1` | yes | 11 / 11 |
-| `src\verify-e2e.ps1` | yes | 88 / 88 |
+| `src\verify-e2e.ps1` | yes | 115 / 115 |
 
 `verify-e2e.ps1` is the full life on a real PC. It:
 - installs into Program Files with the SYSTEM task;

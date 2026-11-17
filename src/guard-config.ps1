@@ -3,7 +3,8 @@
 
 # Overridable so tests can redirect away from C:\ProgramData.
 if (-not $script:GuardConfigPath) {
-    if ($env:GUARD_CONFIG) { $script:GuardConfigPath = $env:GUARD_CONFIG }
+    $t = Get-GuardTestEnv 'GUARD_CONFIG'   # tests only; ignored in admin processes unless HKLM GUARD_TEST=1
+    if ($t) { $script:GuardConfigPath = $t }
     else { $script:GuardConfigPath = Join-Path $env:ProgramData 'guard\config.json' }
 }
 

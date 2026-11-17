@@ -41,6 +41,45 @@ function Attack([string]$folder, [string]$target, [string]$tag) {
     return $r
 }
 
+$envKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+function Set-TestFlag([bool]$on) {
+    $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey, $true)
+    if ($on) { $k.SetValue('GUARD_TEST', '1') } else { $k.DeleteValue('GUARD_TEST', $false) }
+    $k.Close()
+}
+function Raw-Path { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey); try { [string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $k.Close() } }
+function Path-Kind { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey); try { $k.GetValueKind('Path') } finally { $k.Close() } }
+
+# ---------------------------------------------------------------------------
+Section 'an agent''s user env vars are ignored by elevated guard (review finding 1)'
+Set-TestFlag $false
+$probe = Join-Path $env:TEMP 'guard-probe.ps1'
+@"
+. '$src\guard-core.ps1'; . '$src\guard-config.ps1'; . '$src\guard-shell.ps1'
+`$ErrorActionPreference = 'Continue'
+'config=' + `$script:GuardConfigPath
+'source=' + [string](Get-GuardTestEnv 'GUARD_SOURCE')
+'answers=' + [string](Get-GuardTestEnv 'GUARD_ANSWERS')
+'task=' + `$script:GuardTask
+"@ | Set-Content $probe -Encoding UTF8
+$env:GUARD_CONFIG = 'C:\evil\config.json'; $env:GUARD_SOURCE = 'C:\evil'; $env:GUARD_ANSWERS = 'YES'; $env:GUARD_TASK = 'evil'
+$o = powershell -NoProfile -ExecutionPolicy Bypass -File $probe 2>&1 | Out-String
+$env:GUARD_CONFIG = ''; $env:GUARD_SOURCE = ''; $env:GUARD_ANSWERS = ''; $env:GUARD_TASK = ''
+Remove-Item $probe -Force
+Check 'GUARD_CONFIG ignored' ($o -match [regex]::Escape("config=$env:ProgramData\guard\config.json"))
+Check 'GUARD_SOURCE ignored' ($o -match 'source=\r?\n')
+Check 'GUARD_ANSWERS ignored' ($o -match 'answers=\r?\n')
+Check 'GUARD_TASK ignored' ($o -match 'task=guard')
+Set-TestFlag $true   # this test itself needs GUARD_SOURCE / GUARD_ANSWERS; removed at the end
+
+Section 'icacls errors come back as a result, never throw (review finding 9)'
+. "$src\guard-core.ps1"; $ErrorActionPreference = 'Continue'
+$threw = $false
+try { $ErrorActionPreference = 'Stop'; $x = Invoke-Icacls @('C:\definitely-not-here', '/deny', 'Everyone:(DE)') } catch { $threw = $true } finally { $ErrorActionPreference = 'Continue' }
+Check 'missing path: no exception, Ok = false' ((-not $threw) -and $x -and -not $x.Ok)
+
+$rawBefore = Raw-Path
+
 # ---------------------------------------------------------------------------
 Section 'clean start'
 if (Test-Path $prefix) { Write-Host '  guard is already installed here - uninstall it first' -ForegroundColor Red; return }
@@ -54,6 +93,8 @@ Check 'no leftover _guard.json in testing_env' ($stray.Count -eq 0)
 New-Item -ItemType Directory "$A\sub" -Force | Out-Null
 New-Item -ItemType Directory $B -Force | Out-Null
 'a1' | Set-Content "$A\amazon-checkout.png"; 'a2' | Set-Content "$A\godaddy-dns.png"; 'a3' | Set-Content "$A\sub\inner.png"
+'a4' | Set-Content "$A\amazon-2.png"; 'a5' | Set-Content "$A\amazon-3.png"
+'ro' | Set-Content "$A\readonly.png"; (Get-Item "$A\readonly.png").IsReadOnly = $true
 'b1' | Set-Content "$B\tax-2025.pdf"; 'b2' | Set-Content "$B\invoice.pdf"
 
 # ---------------------------------------------------------------------------
@@ -65,7 +106,8 @@ Check 'all 5 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
 $t = Get-ScheduledTask -TaskName guard -EA SilentlyContinue
 Check 'task "guard" runs as SYSTEM at logon' ($t -and $t.Principal.UserId -match 'SYSTEM' -and $t.Triggers[0].CimClass.CimClassName -match 'Logon')
-Check 'PATH has Program Files\guard' (([Environment]::GetEnvironmentVariable('Path','Machine') -split ';') -contains $prefix)
+Check 'PATH has Program Files\guard' ((Raw-Path) -split ';' -contains $prefix)
+Check 'PATH kept as REG_EXPAND_SZ, nothing else changed (review finding 10)' (((Path-Kind) -eq 'ExpandString') -and ((Raw-Path) -eq ($rawBefore.TrimEnd(';') + ';' + $prefix)))
 Check 'background guard started' (WaitFor { @(Watchers).Count -ge 1 } 15)
 $w = Watchers | Select-Object -First 1
 Check 'background guard runs as SYSTEM' ($w -and ((Invoke-CimMethod -InputObject $w -MethodName GetOwner).User -eq 'SYSTEM'))
@@ -86,6 +128,12 @@ Check 'A: subfolder locked + owned by SYSTEM' ((IsLocked "$A\sub") -and (OwnerOf
 Check 'A: file in subfolder locked' (IsLocked "$A\sub\inner.png")
 Check 'both _guard.json hidden + locked' ((IsLocked "$A\_guard.json") -and (IsLocked "$B\_guard.json") -and ((Get-Item "$A\_guard.json" -Force).Attributes -match 'Hidden'))
 Check 'init again: already protected' ((Out-Of "init $A") -match 'already protected')
+Check 'read-only file locked too (review finding 5)' (IsLocked "$A\readonly.png")
+Check 'nested: init inside a protected folder refused (finding 4)' ((Out-Of "init $A\sub") -match 'already protected as part of')
+Check 'nested: init of a folder holding one refused' ((Out-Of "init $root") -match 'holds the protected folder')
+Check 'drive root refused' ((Out-Of 'init C:\') -match "whole drive")
+Check 'Windows folder refused' ((Out-Of "init $env:SystemRoot\Temp") -match "can't be protected")
+Check 'still exactly 2 folders' ($script:Cfg.folders.Count -eq 2)
 Check 'status block renders' ((Show-Status 6>&1 | Out-String) -match 'Beta')
 
 # ---------------------------------------------------------------------------
@@ -139,17 +187,35 @@ Invoke-GuardCommand 'skip *.bak' 6>&1 | Out-Null
 Start-Sleep 4
 Check 'skip *.bak: new .bak not locked' (-not (IsLocked "$A\notes.bak"))
 Check 'skip list shows it' ((Out-Of 'skip') -match '\*\.bak')
+Invoke-GuardCommand 'skip *.log' 6>&1 | Out-Null
+$sk = @($script:Cfg.folders[0].skip)
+Check 'two skip patterns stay separate (review finding 8)' (($sk.Count -eq 2) -and ($sk -contains '*.bak') -and ($sk -contains '*.log'))
+'l' | Set-Content "$A\run.log"; 'b2' | Set-Content "$A\more.bak"
+Start-Sleep 4
+Check 'both patterns work' (-not (IsLocked "$A\run.log") -and -not (IsLocked "$A\more.bak"))
 Invoke-GuardCommand 'skip remove *.bak' 6>&1 | Out-Null
-Check 'skip remove: gone from list' (-not ((Out-Of 'skip') -match 'yours\s+\*\.bak'))
+Check 'skip remove: only that one gone' ((@($script:Cfg.folders[0].skip) -join ',') -eq '*.log')
+Invoke-GuardCommand 'skip remove *.log' 6>&1 | Out-Null
 
 # ---------------------------------------------------------------------------
 Section 'delete inside a protected folder'
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('1')
 Invoke-GuardCommand 'delete godaddy' 6>&1 | Out-Null
 Check 'delete godaddy: gone' (-not (Test-Path "$A\godaddy-dns.png"))
-$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('2')
+# picker: 3 matches (amazon-2, amazon-3, amazon-checkout), pick number 2 then yes (review finding 7)
+$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('2'); $script:InputQueue.Enqueue('1')
 Invoke-GuardCommand 'delete amazon' 6>&1 | Out-Null
+Check 'picker: number 2 deleted exactly amazon-3' (-not (Test-Path "$A\amazon-3.png") -and (Test-Path "$A\amazon-2.png") -and (Test-Path "$A\amazon-checkout.png"))
+$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('2')
+Invoke-GuardCommand 'delete checkout' 6>&1 | Out-Null
 Check 'answer no: kept' (Test-Path "$A\amazon-checkout.png")
+# a delete that fails must not leave the file unlocked (review finding 6)
+$h = [IO.File]::Open("$A\amazon-2.png", 'Open', 'Read', 'None')
+$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('1')
+$o = Out-Of 'delete amazon-2'
+$h.Close()
+Check 'failed delete: says FAIL' ($o -match 'FAIL\s+amazon-2\.png\s+not deleted')
+Check 'failed delete: file still there and locked again' ((Test-Path "$A\amazon-2.png") -and (IsLocked "$A\amazon-2.png"))
 $o = Out-Of 'delete zzzz'
 Check 'no match: says so' ($o -match 'no file matches')
 
@@ -167,13 +233,57 @@ Check '_guard.json travelled' (Test-Path "$B2\_guard.json")
 Check 'background guard watches the new path' (WaitFor { IsLocked "$B2\new-after-move.pdf" } 12)
 
 # ---------------------------------------------------------------------------
+Section 'folder at a drive root: inherited CREATOR OWNER Full Control removed (review finding 2)'
+$G = 'C:\guard-e2e-root'
+if (Test-Path $G) { icacls $G /reset /T /C *> $null; Remove-Item $G -Recurse -Force }
+New-Item -ItemType Directory $G | Out-Null; 'g' | Set-Content "$G\secret.png"
+# Windows 11's C:\ no longer passes down CREATOR OWNER:F, but older systems and freshly formatted
+# data drives (D:\) do, and some folders give Everyone Full Control. Recreate both here.
+icacls $G /grant '*S-1-3-0:(OI)(CI)(IO)F' *> $null
+icacls $G /grant '*S-1-1-0:(OI)(CI)F' *> $null
+$before = (Get-Acl $G).Access | ForEach-Object { $_.IdentityReference.Value }
+Check 'test folder has CREATOR OWNER:F and Everyone:F' (($before -match 'CREATOR OWNER') -and ($before -match 'Everyone'))
+$o = Out-Of "init $G"
+$acc = (Get-Acl $G).Access
+Check 'no CREATOR OWNER left' (-not ($acc | Where-Object { $_.IdentityReference.Value -match 'CREATOR OWNER' }))
+Check 'no group can change permissions or delete inside' (-not ($acc | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -match 'Users|Everyone|INTERACTIVE' -and $_.FileSystemRights.ToString() -match 'FullControl|ChangePermissions|DeleteSubdirectories|Modify|Write' }))
+$r = Attack $G 'secret.png' 'g1'
+Check 'attacks blocked at drive root folder' (-not ($r -match 'SUCCEEDED') -and ($r -contains 'admin: False'))
+Check 'agent''s new file there locked' (WaitFor { IsLocked "$G\agent-new.png" } 10)
+# the agent makes its own subfolder + file and tries to delete inside it
+$mk = Join-Path $env:TEMP 'guard-mk.ps1'
+@"
+New-Item -ItemType Directory '$G\mine' -Force | Out-Null; 'm' | Set-Content '$G\mine\m.png'
+Start-Sleep 6
+try { Remove-Item '$G\mine\m.png' -Force -EA Stop; 'del-inner: SUCCEEDED' } catch { 'del-inner: blocked' }
+`$r = icacls '$G\mine' /grant "`$([Security.Principal.WindowsIdentity]::GetCurrent().Name):F" 2>&1; if (`$LASTEXITCODE -eq 0) { 'grant-F: SUCCEEDED' } else { 'grant-F: blocked' }
+'DONE'
+"@ | Set-Content $mk -Encoding UTF8
+$log = Join-Path $env:TEMP 'guard-mk.log'; Remove-Item $log -EA SilentlyContinue
+$act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c powershell -NoProfile -ExecutionPolicy Bypass -File `"$mk`" > `"$log`" 2>&1"
+$pr  = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName 'guard-attack-test' -Action $act -Principal $pr -Force | Out-Null
+Start-ScheduledTask -TaskName 'guard-attack-test'
+WaitFor { (Test-Path $log) -and ((Get-Content $log -Raw) -match 'DONE') } 40 | Out-Null
+Unregister-ScheduledTask -TaskName 'guard-attack-test' -Confirm:$false -EA SilentlyContinue
+$r = @(); if (Test-Path $log) { $r = Get-Content $log }; $r | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+Check 'agent''s own subfolder: no delete inside, no Full Control' (($r -contains 'del-inner: blocked') -and ($r -contains 'grant-F: blocked'))
+Remove-Item $mk, $log -Force -EA SilentlyContinue
+Invoke-GuardCommand "use 3" 6>&1 | Out-Null
+Invoke-GuardCommand 'remove' 6>&1 | Out-Null
+$gone = $true; try { Remove-Item $G -Recurse -Force -ErrorAction Stop } catch { $gone = $false }
+Check 'remove: drive-root folder deletes normally again' ($gone -and -not (Test-Path $G))
+Check 'C:\ has no deny left for the user' (-not (IsLocked 'C:\'))
+Invoke-GuardCommand "use 1" 6>&1 | Out-Null
+
+# ---------------------------------------------------------------------------
 Section 'help, typos, cls'
 Check 'help edit: long text' ((Out-Of 'help edit') -match 'If you forget, the next')
 Check 'help all: every command' (((Out-Of 'help all') -match 'uninstall') -and ((Out-Of 'help all') -match 'skip'))
 Check 'help nosuch: says no command' ((Out-Of 'help dleete') -match 'did you mean  delete')
 Check 'typo: did you mean' ((Out-Of 'delet amazon') -match 'did you mean  delete')
 Check 'help (plain) = command table' ((Out-Of 'help') -match 'Current folder')
-Check 'list: shows files' ((Out-Of 'list') -match 'invoice.pdf')
+Check 'list: shows files' ((Out-Of 'list') -match 'amazon-checkout.png')
 
 # ---------------------------------------------------------------------------
 Section 'update line + update to a newer version'
@@ -214,7 +324,7 @@ Check 'background guard stopped' (WaitFor { @(Watchers).Count -eq 0 } 15)
 Check 'task removed' ($null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
 Check 'Program Files\guard removed' (-not (Test-Path $prefix))
 Check 'ProgramData\guard removed' (-not (Test-Path "$env:ProgramData\guard"))
-Check 'PATH entry removed' (-not (([Environment]::GetEnvironmentVariable('Path','Machine') -split ';') -contains $prefix))
+Check 'PATH back exactly as before, still REG_EXPAND_SZ' (((Raw-Path) -eq $rawBefore) -and ((Path-Kind) -eq 'ExpandString'))
 Check 'folders owned by you again' ((OwnerOf $A) -match 'ojhas' -and (OwnerOf "$A\amazon-checkout.png") -match 'ojhas' -and (OwnerOf "$B2\invoice.pdf") -match 'ojhas')
 Check 'no lock left' (-not (IsLocked "$A\amazon-checkout.png") -and -not (IsLocked "$A\sub") -and -not (IsLocked $A))
 Check '_guard.json kept as memory' ((Test-Path "$A\_guard.json") -and (Test-Path "$B2\_guard.json"))
@@ -248,6 +358,9 @@ Check 'testing_env has no deny left' (-not (IsLocked (Join-Path $repo 'testing_e
 Check 'no background guard left running' (@(Watchers).Count -eq 0)
 Check 'ProgramData\guard gone' (-not (Test-Path "$env:ProgramData\guard"))
 Remove-Item $fake -Recurse -Force -EA SilentlyContinue
+Check 'PATH exactly as before after the whole run' ((Raw-Path) -eq $rawBefore)
+Set-TestFlag $false
+Check 'test switch GUARD_TEST removed' (-not (Get-ItemProperty "HKLM:\$envKey" -Name GUARD_TEST -EA SilentlyContinue))
 
 $color='Green'; if($fail){$color='Red'}
 Write-Host "`n$pass passed, $fail failed" -ForegroundColor $color

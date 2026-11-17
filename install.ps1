@@ -15,10 +15,23 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
 $repo = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
 $runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
-$taskName = 'guard'; if ($env:GUARD_TASK) { $taskName = $env:GUARD_TASK }
-if (-not $Source -and $env:GUARD_SOURCE) { $Source = $env:GUARD_SOURCE }
-
 function Is-Admin { $id=[Security.Principal.WindowsIdentity]::GetCurrent(); (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+
+# Test overrides from the environment only when they can't help an attacker: in a process
+# without admin, or when an admin set GUARD_TEST=1 machine-wide (see Test-GuardTestMode).
+# A limited agent can setx user env vars that this elevated installer would inherit.
+function Test-InstallTestMode {
+    if (-not (Is-Admin)) { return $true }
+    try {
+        $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+        try { return ([string]$k.GetValue('GUARD_TEST', '') -eq '1') } finally { $k.Close() }
+    } catch { return $false }
+}
+$taskName = 'guard'
+if (Test-InstallTestMode) {
+    if ($env:GUARD_TASK) { $taskName = $env:GUARD_TASK }
+    if (-not $Source -and $env:GUARD_SOURCE) { $Source = $env:GUARD_SOURCE }
+}
 function StepOk([string]$name,[string]$detail){ Write-Host ("  ok    {0,-9}  {1}" -f $name,$detail) -ForegroundColor Green }
 function StepFail([string]$name,[string]$detail){ Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red }
 function Bar([string]$what,[int]$n,[int]$tot) {
@@ -100,11 +113,14 @@ try {
     else { StepOk 'files' 'guard.ps1  ·  guard.cmd  ·  modules' }
 } catch { StepFail 'files' $_.Exception.Message; Fail-Out "couldn't get the guard files" 'check the internet connection, then run the install line again'; return }
 
-# 5 path
+# from here on, guard's own code does the work (PATH, memory, restore)
+. "$Prefix\guard-shell.ps1"
+$ErrorActionPreference = 'Stop'
+$script:User = $u
+
+# 5 path: the raw registry value, so %SystemRoot% and other %VAR% entries stay as they are
 try {
-    $mp = [Environment]::GetEnvironmentVariable('Path','Machine')
-    if (($mp -split ';') -contains $Prefix) { StepOk 'path' 'already there' }
-    else { [Environment]::SetEnvironmentVariable('Path', ($mp.TrimEnd(';')+';'+$Prefix), 'Machine'); StepOk 'path' 'added for all users' }
+    if (Add-GuardMachinePath $Prefix) { StepOk 'path' 'added for all users' } else { StepOk 'path' 'already there' }
 } catch { StepFail 'path' $_.Exception.Message; Fail-Out "couldn't add guard to PATH" 'run the install line again'; return }
 
 # 6 task
@@ -113,7 +129,7 @@ if ($NoTask) { StepOk 'task' 'skipped (test)' } else {
         $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Prefix\guard-watch.ps1`" -User `"$u`""
         $trg = New-ScheduledTaskTrigger -AtLogOn
         $pr  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+        $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $taskName -Action $act -Trigger $trg -Principal $pr -Settings $set -Force | Out-Null
         StepOk 'task' ("`"{0}`"  ·  runs as SYSTEM  ·  at logon  ·  hidden  ·  restarts itself if it stops" -f $taskName)
     } catch { StepFail 'task' $_.Exception.Message; Fail-Out "couldn't create the background task" 'run the install line again'; return }
@@ -128,8 +144,6 @@ try {
 } catch { StepFail 'guard' $_.Exception.Message }
 
 # 8 memory: an earlier install's folders (fresh install only)
-. "$Prefix\guard-shell.ps1"
-$script:User = $u
 $restoreFrom = $null
 if ($Update) {
     $c = Load-GuardConfig
