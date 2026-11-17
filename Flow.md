@@ -3,22 +3,23 @@
 Rules used everywhere below:
 - Command table shows only at start and after `cls`, followed by every protected folder, one block under the other. Every other prompt shows only the current folder's block.
 - The status block sits between two separator lines. `update` and `next` lines come after the bottom one, then a blank line, then `guard>`. `next` appears only when something needs you, and says what to type.
-- The background guard checks GitHub for a newer version and downloads it quietly. Nothing installs by itself. A yellow `update` line then sits between the separator and `next`: `update  New version is available. Type  update  to keep guard up to date.` Offline → nothing.
+- The background guard checks GitHub for a newer version every 6 hours. Nothing installs by itself. A yellow `update` line then sits between the separator and `next`: `update  New version is available. Type  update  to keep guard up to date.` Offline → nothing.
 - Chrome (and any program) can always add new files to a protected folder. Only delete and rename of existing files is blocked. A new file is locked the moment it is finished.
 - Every command that touches many files prints the count and asks once.
 - `<name>` is a partial match. One match → acts. Many → numbered picker.
 - Questions always look the same: facts first, then the question, then a numbered menu. `>` marks the chosen row; ↑ ↓ moves it, Enter picks; or type the number(s) and Enter. Picked rows turn green. Esc or `n` = back to `guard>` with `cancelled`.
-- Dangerous actions (delete all, move all, remove all, uninstall) have no menu: you must type `YES`.
+- Dangerous actions (delete all, move all, remove all, uninstall) have no menu: you must type `YES` (any case: yes, Yes, YES).
 - `all` works after any command that takes a target: `list all`, `delete all`, `move all`, `edit all`, `resume all`, `remove all`, `help all`.
 - `init` with no path = the folder the terminal is in. `init <path>` = any folder. No question is asked: typing `init` is the answer. Facts line, then locking starts. Ctrl+C during locking undoes what was done so far.
-- `init` protects every file, subfolders included, except files on the skip list (temp files). The skip list is built in (`~$*  *.tmp  *.temp  *.crdownload  *.part  Thumbs.db  desktop.ini`) and you can add to it with `skip`.
+- `init` protects every file, subfolders included, except files on the skip list (temp files). The skip list is built in (`~$*  *.tmp  *.temp  *.crdownload  *.part  Thumbs.db  desktop.ini`) and you can add to it with `skip`. Subfolders are locked too: they can't be renamed or moved out.
+- `init` refuses a whole drive, Windows and program folders, and a folder inside or around another protected folder.
 - `edit` unlocks the current folder and opens it in Explorer. No timer. It locks again at the next logon, or when you type `resume`. While unlocked it is a normal folder: you, Excel, Photoshop, and also AI agents can delete in it.
 - Editing files: Word, Excel, Photoshop, Notepad++ and most programs save by deleting the old file and renaming a new one. Inside a locked folder that delete is blocked, so Save fails. Opening and reading always works. To change files: `edit`, work, `resume`.
 - Cloud folders (OneDrive, Google Drive, Dropbox): allowed only when the files are really on the disk ("Always keep on this device" / "Available offline"). `init` checks and refuses otherwise. A delete made from the phone or the web is blocked on the PC; the file stays here. (v2: guard shows those files and asks keep or delete.)
 - Memory: every protected folder holds a hidden, locked `_guard.json` with all settings and the list of every protected folder. `C:\ProgramData\guard\config.json` is only a fast copy. If any protected folder survives a reinstall, disk move or backup, everything can be restored from it.
 - guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard opens in its own window. Everything inside runs with no more prompts. Close the window, next `guard` asks again.
 - Protected files are owned by SYSTEM, not you. So you, and every program or AI agent running as you, can't delete or unlock them. Only a human clicking Yes on the UAC prompt can. The background guard runs as SYSTEM and locks new files without prompts.
-- Never run an AI agent from an admin terminal: it would inherit full rights. guard warns if it sees that.
+- Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `admin     running as administrator  ·  no prompt needed`.
 - Plain words only. Never shown: ACL, deny, DE, DC, parent, sweep, watcher.
 - Colours: `LOCKED` `running` `ok` green · `PARTIAL` `UNLOCKED` `STOPPED` `NOT locked` `FAIL` red · `update` and warnings yellow.
 
@@ -43,26 +44,27 @@ Public repo, nothing else needed on the PC. The install needs administrator righ
 
 While running (step name at the end of the bar line):
 ```
-guard  installing   [=================-------------]   57%   4/7   task
+guard  installing   [===============---------------]   50%   4/8   path
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
   ok    folder     C:\Program Files\guard
-  ok    files      guard.ps1 · guard.cmd
+  ok    files      guard.ps1 · guard.cmd · modules
   ..    path       adding for all users
 ```
 
 Done:
 ```
-guard  installing   [==============================]  100%   7/7
+guard  installing   [==============================]  100%   8/8
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
   ok    folder     C:\Program Files\guard
-  ok    files      guard.ps1 · guard.cmd
+  ok    files      guard.ps1 · guard.cmd · modules
   ok    path       added for all users
   ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard running
+  ok    memory     nothing from an earlier install
 
   installed successfully.                                                        ← green
   open a new terminal and type:  guard                                           ← guard in cyan
@@ -70,7 +72,7 @@ guard  installing   [==============================]  100%   7/7
 
 Failed (install stops, later steps skipped, problem and fix always at the bottom):
 ```
-guard  installing   [=====-------------------------]   14%   1/7   stopped
+guard  installing   [====--------------------------]   13%   1/8   stopped
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   FAIL  uac        User Account Control is turned off
@@ -79,6 +81,7 @@ guard  installing   [=====-------------------------]   14%   1/7   stopped
   --    path       skipped
   --    task       skipped
   --    guard      skipped
+  --    memory     skipped
 
   not installed.  do the fix below and try again.                                ← red
 
@@ -94,6 +97,7 @@ Another failure example:
 ```
   FAIL  task       Register-ScheduledTask: access denied
   --    guard      skipped
+  --    memory     skipped
 
   not installed.  do the fix below and try again.                                ← red
 
@@ -175,10 +179,10 @@ skip <pattern>            add files that are never locked
 skip remove <pattern>     take a pattern out
 
 
-------------------------------------------------------------
+--------------------------------------------------------------------------------------
 folder    none yet
 guard     running                    nothing to protect
-------------------------------------------------------------
+--------------------------------------------------------------------------------------
 
 next      init / init <path>
 
@@ -392,6 +396,14 @@ guard> delete amazon
 guard>
 ```
 
+### can't be deleted (open in another program)
+```
+  FAIL  notes.docx  not deleted, still protected  ·  open in another program
+```
+The file stays locked. Close the program and try again.
+
+A folder can be picked too: it is deleted with everything inside.
+
 ### no match
 ```
 guard> delete flipkart
@@ -453,7 +465,9 @@ guard>
 ```
 
 Many matches → the same "Which files?" picker as delete, then the questions above.
-`copy` keeps the original locked; the copy is a normal file.
+`copy` keeps the original locked; the copy is a normal file. What arrives at the new place is yours: you own it, normal permissions.
+Folders can be moved or copied too, with everything inside.
+The destination must be outside the protected folder: `pick a folder outside _Screenshots`.
 `move all` → path, cut or copy, then `This moves 45 files. type YES to continue, anything else to cancel >`.
 
 ### move the whole protected folder
@@ -633,7 +647,19 @@ guard> init C:\nope
 ```
 ```
 guard> init C:\Windows
-  can't protect this: you are not the owner of the folder
+  Windows and program folders can't be protected: C:\Windows
+```
+```
+guard> init C:\
+  a whole drive can't be protected. pick a folder on it
+```
+```
+guard> init C:\Users\ojhas\Downloads\_Screenshots\2025
+  already protected as part of C:\Users\ojhas\Downloads\_Screenshots
+```
+```
+guard> init C:\Users\ojhas\Downloads
+  this folder holds the protected folder C:\Users\ojhas\Downloads\_Screenshots. remove that one first, then init here
 ```
 
 ---
@@ -745,10 +771,9 @@ Chrome is saving right now:
 
 Update check failed (offline): no update line, nothing else changes.
 
-Started from a terminal that was already running as administrator (yellow, every prompt):
+Started from a terminal that was already running as administrator (no prompt; green, once, when guard opens):
 ```
-warning   this terminal already had admin rights before guard opened.
-          if an AI agent runs in it, it can unlock files. use a normal terminal for agents.
+admin     running as administrator  ·  no prompt needed
 ```
 
 ---
@@ -821,7 +846,7 @@ Ctrl+C anywhere = same as exit, nothing left half-done (an edit locks again at n
 ## 14. Reboot / logon (no typing)
 
 - Logon → task starts the background guard hidden → full check: every protected folder, every file, lock what's missing → keep watching.
-- Background guard stops → task restarts it (3 tries, 1 min apart).
+- Background guard stops → task restarts it (every minute, as often as needed).
 - Logon missed (PC asleep) → task runs as soon as possible.
 - Nothing shows on screen. Open `guard` to see `last full check`.
 
