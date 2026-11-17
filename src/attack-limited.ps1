@@ -32,7 +32,15 @@ $r = icacls "$f" /reset 2>&1; $out += ("icacls reset: " + $(if ($LASTEXITCODE -e
 try { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction Stop; $out += 'delete folder: SUCCEEDED (BAD)' } catch { $out += 'delete folder: blocked' }
 # 9 rename folder
 try { Rename-Item -LiteralPath $Folder -NewName 'owntest-x' -ErrorAction Stop; $out += 'rename folder: SUCCEEDED (BAD)' } catch { $out += 'rename folder: blocked' }
-# 10 overwrite-then-shrink (data destroy without delete) — allowed by design (Modify), recorded
+# 10 subfolder: rename it, move it out, delete a file inside it (only when there is one)
+$sub = Join-Path $Folder 'sub'
+if (Test-Path $sub) {
+    try { Rename-Item -LiteralPath $sub -NewName 'sub-x' -ErrorAction Stop; $out += 'rename subfolder: SUCCEEDED (BAD)' } catch { $out += 'rename subfolder: blocked' }
+    try { Move-Item -LiteralPath $sub -Destination (Join-Path (Split-Path $Folder -Parent) 'stolen') -ErrorAction Stop; $out += 'move subfolder out: SUCCEEDED (BAD)' } catch { $out += 'move subfolder out: blocked' }
+    $inner = Get-ChildItem -LiteralPath $sub -File -Force -EA SilentlyContinue | Select-Object -First 1
+    if ($inner) { try { Remove-Item -LiteralPath $inner.FullName -Force -ErrorAction Stop; $out += 'delete file in subfolder: SUCCEEDED (BAD)' } catch { $out += 'delete file in subfolder: blocked' } }
+}
+# (overwriting a file's contents is allowed on purpose: Word/Excel must save. guard protects against deletion.)
 # 11 normal use must still work: read the file, add a new file
 try { $null = Get-Content -LiteralPath $f -ErrorAction Stop; $out += 'read file: ok' } catch { $out += 'read file: FAILED (BAD)' }
 try { Set-Content -LiteralPath (Join-Path $Folder 'agent-new.png') 'n' -ErrorAction Stop; $out += 'add new file: ok' } catch { $out += 'add new file: FAILED (BAD)' }

@@ -3,6 +3,70 @@
 
 $ErrorActionPreference = 'Stop'
 
+$script:GuardVersion = '1.0'
+$script:GuardRepo    = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
+$script:GuardTask    = 'guard'; if ($env:GUARD_TASK) { $script:GuardTask = $env:GUARD_TASK }
+$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
+
+function Get-GuardSourceText {
+    # Text of one file from the newest guard: GitHub, or $env:GUARD_SOURCE (a local folder) in tests.
+    # install.ps1 sits in the repo root, everything else in src/.
+    param([string]$Name)
+    if ($env:GUARD_SOURCE) {
+        $p = Join-Path $env:GUARD_SOURCE $Name
+        if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path (Split-Path $env:GUARD_SOURCE -Parent) $Name }
+        return Get-Content -LiteralPath $p -Raw -Encoding UTF8 -ErrorAction Stop
+    }
+    $sub = 'src/'; if ($Name -eq 'install.ps1') { $sub = '' }
+    return (Invoke-WebRequest "$script:GuardRepo/$sub$Name" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content
+}
+
+function Get-GuardRemoteVersion {
+    # Newest version number, or $null when offline.
+    try {
+        $t = Get-GuardSourceText 'guard-core.ps1'
+        if ($t -match "GuardVersion\s*=\s*'([\d\.]+)'") { return $Matches[1] }
+    } catch { }
+    return $null
+}
+
+function Test-GuardNewer {
+    param([string]$Remote, [string]$Local = $script:GuardVersion)
+    if (-not $Remote) { return $false }
+    try { return ([version]$Remote -gt [version]$Local) } catch { return $false }
+}
+
+function Stop-GuardWatch {
+    # Stop every running background guard started from $Dir (or from anywhere when $Dir is blank).
+    param([string]$Dir = '')
+    $n = 0
+    try { Stop-ScheduledTask -TaskName $script:GuardTask -ErrorAction Stop } catch { }
+    $procs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+             Where-Object { $_.CommandLine -like '*guard-watch.ps1*' -and $_.ProcessId -ne $PID }
+    $ids = @()
+    foreach ($p in $procs) {
+        if ($Dir -and ($p.CommandLine -notlike "*$Dir*")) { continue }
+        $ids += $p.ProcessId
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $n++ } catch { }
+    }
+    # wait until they are really gone, so none writes its status file after we clean up
+    for ($i = 0; $i -lt 40; $i++) {
+        if (-not ($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    return $n
+}
+
+function Start-GuardWatch {
+    # Only for a real install: the scheduled task (runs as SYSTEM), else a direct start from an
+    # install folder. A source checkout (tests) never starts one: it would outlive the test.
+    param([string]$Dir, [string]$User)
+    try { Get-ScheduledTask -TaskName $script:GuardTask -ErrorAction Stop | Out-Null; Start-ScheduledTask -TaskName $script:GuardTask; return 'task' } catch { }
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir 'guard.cmd'))) { return $null }
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Dir\guard-watch.ps1`" -User `"$User`""
+    return 'direct'
+}
+
 # Files that are never locked and can always be deleted.
 $script:BuiltinSkip = @('~$*', '*.tmp', '*.temp', '*.crdownload', '*.part', 'Thumbs.db', 'desktop.ini')
 
@@ -101,9 +165,11 @@ function Lock-GuardFolder {
 }
 
 function Unlock-GuardFolder {
-    param([string]$Folder, [string]$User)
+    # -KeepAbove: another protected folder lives in the same folder above and still needs its rule.
+    param([string]$Folder, [string]$User, [switch]$KeepAbove)
     $above = Split-Path $Folder -Parent
     $r1 = Invoke-Icacls @($Folder, '/remove:d', $User)
+    if ($KeepAbove) { return [pscustomobject]@{ Ok = $r1.Ok; FolderOut=$r1.Out; AboveOut='kept' } }
     $r2 = Invoke-Icacls @($above,  '/remove:d', $User)
     return [pscustomobject]@{ Ok = ($r1.Ok -and $r2.Ok); FolderOut=$r1.Out; AboveOut=$r2.Out }
 }
@@ -115,12 +181,30 @@ function Get-GuardFiles {
            Where-Object { $_.Name -ne '_guard.json' }
 }
 
+function Lock-GuardSubfolder {
+    # A subfolder can't be renamed or moved out (DE). Its files are locked one by one.
+    param([string]$Path, [string]$User)
+    if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
+    return (Invoke-Icacls @($Path, '/deny', ($User+':(DE)'))).Ok
+}
+
+function Get-GuardSubfolders {
+    param([string]$Folder)
+    return Get-ChildItem -LiteralPath $Folder -Recurse -Directory -Force -ErrorAction SilentlyContinue
+}
+
 function Lock-GuardTree {
-    # Lock the folder, the folder above, and every file. Returns counts + the not-locked list.
-    param([string]$Folder, [string]$User, [string[]]$Skip = @())
+    # Lock the folder, the folder above, every subfolder and every file. Returns counts + the not-locked list.
+    # -ShouldStop: checked before every item; returning $true stops early (background guard: config changed).
+    param([string]$Folder, [string]$User, [string[]]$Skip = @(), [scriptblock]$ShouldStop = $null)
     $folderRes = Lock-GuardFolder -Folder $Folder -User $User
-    $locked = 0; $waiting = @(); $skipped = 0; $failed = @()
+    $locked = 0; $waiting = @(); $skipped = 0; $failed = @(); $stopped = $false
+    foreach ($d in (Get-GuardSubfolders -Folder $Folder)) {
+        if ($ShouldStop -and (& $ShouldStop)) { $stopped = $true; break }
+        Lock-GuardSubfolder -Path $d.FullName -User $User | Out-Null
+    }
     foreach ($f in (Get-GuardFiles -Folder $Folder)) {
+        if ($stopped -or ($ShouldStop -and (& $ShouldStop))) { $stopped = $true; break }
         $r = Lock-GuardFile -Path $f.FullName -User $User -Skip $Skip
         switch ($r.State) {
             'locked'  { $locked++ }
@@ -131,17 +215,18 @@ function Lock-GuardTree {
     }
     return [pscustomobject]@{
         FolderOk = $folderRes.Ok; FolderRes = $folderRes
-        Locked = $locked; Skipped = $skipped; Waiting = $waiting; Failed = $failed
+        Locked = $locked; Skipped = $skipped; Waiting = $waiting; Failed = $failed; Stopped = $stopped
     }
 }
 
 function Unlock-GuardTree {
-    param([string]$Folder, [string]$User)
+    param([string]$Folder, [string]$User, [switch]$KeepAbove)
     $n = 0
     foreach ($f in (Get-GuardFiles -Folder $Folder)) {
         $r = Unlock-GuardFile -Path $f.FullName -User $User
         if ($r.State -eq 'unlocked') { $n++ }
     }
-    $folderRes = Unlock-GuardFolder -Folder $Folder -User $User
+    foreach ($d in (Get-GuardSubfolders -Folder $Folder)) { Invoke-Icacls @($d.FullName, '/remove:d', $User) | Out-Null }
+    $folderRes = Unlock-GuardFolder -Folder $Folder -User $User -KeepAbove:$KeepAbove
     return [pscustomobject]@{ FolderOk = $folderRes.Ok; Unlocked = $n }
 }

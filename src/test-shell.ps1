@@ -54,6 +54,7 @@ Check "docs _guard.json gone"        (-not (Test-Path (Join-Path $docs '_guard.j
 
 Write-Host "`n== cleanup: remove all, verify unlocked ==" -ForegroundColor Cyan
 Feed @()
+$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')   # remove all needs YES
 Invoke-GuardCommand "remove all" | Out-Null
 Check "no folders left"              ($script:Cfg.folders.Count -eq 0)
 Check "shots fully unlocked"         (TryDelete $shots)

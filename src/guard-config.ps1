@@ -26,7 +26,6 @@ function Write-GuardJsonFile {
     param([string]$Path, $Config)
     $dir = Split-Path $Path -Parent
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $Config.saved = (Get-Date).ToString('o')
     $json = $Config | ConvertTo-Json -Depth 8
     Set-Content -LiteralPath $Path -Value $json -Encoding UTF8
 }
@@ -34,6 +33,8 @@ function Write-GuardJsonFile {
 function Save-GuardConfig {
     # Write the master copy and a hidden _guard.json into every protected folder.
     param($Config, [string]$User)
+    # one stamp for every copy: identical copies, and the background guard can report which it has
+    $Config.saved = (Get-Date).ToString('o')
     Write-GuardJsonFile -Path $script:GuardConfigPath -Config $Config
     foreach ($f in $Config.folders) {
         if (-not (Test-Path -LiteralPath $f.path)) { continue }
@@ -59,6 +60,8 @@ function Load-GuardConfig {
     return New-GuardConfig
 }
 
+$script:MemoryFoundIn = $null   # set by Find-GuardMemory: the folder whose _guard.json was used
+
 function Find-GuardMemory {
     # Search likely places for any _guard.json; return the newest config it holds.
     $places = @(
@@ -70,12 +73,13 @@ function Find-GuardMemory {
     foreach ($d in ([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })) { $places += $d }
     $best = $null; $bestTime = [datetime]::MinValue
     foreach ($place in ($places | Select-Object -Unique)) {
-        if (-not (Test-Path -LiteralPath $place)) { continue }
+        # SYSTEM has no Documents/Pictures: those come back empty
+        if (-not $place -or -not (Test-Path -LiteralPath $place)) { continue }
         Get-ChildItem -LiteralPath $place -Filter '_guard.json' -Recurse -Force -Depth 4 -ErrorAction SilentlyContinue | ForEach-Object {
             $c = Read-GuardJson -Path $_.FullName
             if ($c -and $c.saved) {
                 $t = [datetime]$c.saved
-                if ($t -gt $bestTime) { $bestTime = $t; $best = $c }
+                if ($t -gt $bestTime) { $bestTime = $t; $best = $c; $script:MemoryFoundIn = $_.DirectoryName }
             }
         }
     }

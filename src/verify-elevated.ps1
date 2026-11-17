@@ -32,7 +32,7 @@ Check "user does NOT have ChangePermissions/FullControl (can't alter the lock)" 
 
 # --- part 2: real install into Program Files + scheduled task ---
 Write-Host "`n== real install ==" -ForegroundColor Cyan
-& "$src\install.ps1" -Source $src -NoElevate | Out-Null
+& "$src\..\install.ps1" -Source $src -NoElevate | Out-Null
 Check "guard.ps1 in Program Files" (Test-Path 'C:\Program Files\guard\guard.ps1')
 Check "guard.cmd wrapper present"  (Test-Path 'C:\Program Files\guard\guard.cmd')
 Check "scheduled task 'guard' exists" ($null -ne (Get-ScheduledTask -TaskName 'guard' -EA SilentlyContinue))
