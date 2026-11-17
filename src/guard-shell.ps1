@@ -31,7 +31,27 @@ function Read-Line([string]$Prompt) {
     return $v.Trim()
 }
 function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $c }
-function Ok([string]$label, [string]$detail) { Write-Host ("  {0,-9} {1,-40} ok" -f $label, $detail) -ForegroundColor Green }
+# result rows, as in Flow.md: label, what, (optional) plain-words meaning, ok at column 81
+function Ok([string]$label, [string]$detail, [string]$meaning = '') {
+    $body = "{0,-9} {1}" -f $label, $detail
+    if ($meaning) { $body = "{0,-9} {1,-25} {2}" -f $label, $detail, $meaning }
+    Write-Host ("  {0} ok" -f $body.PadRight(76)) -ForegroundColor Green
+}
+function Format-Size([double]$b) {
+    if ($b -ge 1GB) { return '{0:0.0} GB' -f ($b / 1GB) }
+    if ($b -ge 1MB) { return '{0:0.0} MB' -f ($b / 1MB) }
+    if ($b -ge 1KB) { return '{0:0.0} KB' -f ($b / 1KB) }
+    return '{0:0} B' -f $b
+}
+function Format-When($t) {
+    # 21:04 today  /  2026-07-30
+    if (-not $t) { return '' }
+    $t = [datetime]$t
+    if ($t.Date -eq (Get-Date).Date) { return ('{0:HH:mm} today' -f $t) }
+    return ('{0:yyyy-MM-dd}' -f $t)
+}
+function N([int]$n, [string]$word) { if ($n -eq 1) { return "1 $word" }; return "$n ${word}s" }   # 1 file / 2 files
+function Test-Quiet { [bool](Get-GuardTestEnv 'GUARD_NOBROWSER') }   # tests: no browser, no Explorer windows
 
 # ---- helpers --------------------------------------------------------------
 function Cur { if ($script:Cfg.folders.Count -eq 0) { return $null }; return $script:Cfg.folders[$script:Cfg.current] }
@@ -70,10 +90,14 @@ function Find-Matches($f, [string]$name) {
     if (-not $name) { return $items }
     return $items | Where-Object { $_.Name -like "*$name*" }
 }
-function Format-Item($x) {
-    $size = '  folder'; if (-not $x.PSIsContainer) { $size = '{0,8:N0} B' -f $x.Length }
-    $rel = $x.FullName.Substring((Cur).path.Length).TrimStart('\')
-    return ("{0,-34} {1:yyyy-MM-dd HH:mm}  {2}" -f $rel, $x.LastWriteTime, $size)
+function Format-Item($x, [switch]$Where) {
+    # amazon-checkout.png     2026-11-15 21:04    1.2 MB   (-Where: + the folder it is in)
+    $size = 'folder'; if (-not $x.PSIsContainer) { $size = Format-Size $x.Length }
+    $base = (Cur).path
+    $rel = $x.FullName; if ($rel.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { $rel = $rel.Substring($base.Length).TrimStart('\') }
+    $s = "{0,-28} {1:yyyy-MM-dd HH:mm}  {2,8}" -f $rel, $x.LastWriteTime, $size
+    if ($Where) { $s += "   " + (Split-Path $x.FullName -Parent) }
+    return $s
 }
 
 function Unlock-GuardItem($x) {
@@ -121,7 +145,7 @@ function Select-Menu([string[]]$Options, [int]$Default = 1) {
     $width = 0; try { $width = [Console]::BufferWidth - 1 } catch { $width = 79 }
     $draw = {
         for ($i = 0; $i -lt $n; $i++) {
-            $m = ' '; $c = 'Gray'; if ($i -eq $sel - 1) { $m = '>'; $c = 'Cyan' }
+            $m = ' '; $c = 'Gray'; if ($i -eq $sel - 1) { $m = '>'; $c = 'Green' }
             Write-Host (("  {0} {1}  {2}" -f $m, ($i+1), $Options[$i]).PadRight($width)) -ForegroundColor $c
         }
         Write-Host -NoNewline (($hint + $sel).PadRight($width))
@@ -138,6 +162,71 @@ function Select-Menu([string[]]$Options, [int]$Default = 1) {
         else { continue }
         try { [Console]::SetCursorPosition(0, $top) } catch { }
         & $draw
+    }
+}
+
+function Select-Items([string[]]$Rows) {
+    # Pick one or more rows. Last row is 'all'. Real console: ↑ ↓ move the '>', Enter picks it;
+    # or type numbers (1 3) then Enter. Picked rows turn green. Esc or n = cancel.
+    # Returns the picked row numbers (1-based), all rows for 'all', or @() for cancel.
+    $all = $Rows.Count + 1
+    $opts = @($Rows) + @('all')
+    $live = $true
+    try { if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { $live = $false } } catch { $live = $false }
+    if (($script:InputQueue -and $script:InputQueue.Count) -or (Get-GuardTestEnv 'GUARD_ANSWERS')) { $live = $false }
+    $parse = {
+        param([string]$a)
+        $a = $a.Trim()
+        if (-not $a -or $a -match '^(n|no)$') { return @() }
+        if ($a -eq 'all') { return @(1..$Rows.Count) }
+        $p = @()
+        foreach ($t in ($a -split '[\s,]+')) {
+            if ($t -match '^\d+$') {
+                $v = [int]$t
+                if ($v -eq $all) { return @(1..$Rows.Count) }
+                if ($v -ge 1 -and $v -le $Rows.Count -and $p -notcontains $v) { $p += $v }
+            }
+        }
+        return $p
+    }
+    $hint = "  type numbers ({0}) or ↑ ↓ then Enter > " -f $(if ($Rows.Count -ge 3) { '1 3' } else { '1 2' })
+    if (-not $live) {
+        for ($i = 0; $i -lt $opts.Count; $i++) { $m = ' '; if ($i -eq 0) { $m = '>' }; Say ("  {0} {1}  {2}" -f $m, ($i+1), $opts[$i]) }
+        return @(& $parse (Read-Line $hint))
+    }
+    $sel = 1; $buf = ''
+    $width = 0; try { $width = [Console]::BufferWidth - 1 } catch { $width = 79 }
+    $draw = {
+        param($picked)
+        for ($i = 0; $i -lt $opts.Count; $i++) {
+            $m = ' '; $c = 'Gray'
+            if ($i -eq $sel - 1) { $m = '>'; $c = 'Green' }
+            if ($picked -and ($picked -contains ($i + 1))) { $c = 'Green' }
+            Write-Host (("  {0} {1}  {2}" -f $m, ($i+1), $opts[$i]).PadRight($width)) -ForegroundColor $c
+        }
+        Write-Host -NoNewline (($hint + $buf).PadRight($width))
+    }
+    & $draw @()
+    $top = [Console]::CursorTop - $opts.Count
+    while ($true) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -eq 'Escape') { Write-Host ""; return @() }
+        if ($k.Key -eq 'Enter') {
+            $picked = @()
+            if ($buf.Trim()) { $picked = @(& $parse $buf) }
+            elseif ($sel -eq $all) { $picked = @(1..$Rows.Count) }
+            else { $picked = @($sel) }
+            try { [Console]::SetCursorPosition(0, $top) } catch { }
+            & $draw $picked; Write-Host ""
+            return $picked
+        }
+        if ($k.Key -eq 'UpArrow' -and $sel -gt 1) { $sel-- }
+        elseif ($k.Key -eq 'DownArrow' -and $sel -lt $opts.Count) { $sel++ }
+        elseif ($k.Key -eq 'Backspace') { if ($buf.Length) { $buf = $buf.Substring(0, $buf.Length - 1) } }
+        elseif ($k.KeyChar -match '[0-9 ,a-zA-Z]') { $buf += $k.KeyChar }
+        else { continue }
+        try { [Console]::SetCursorPosition(0, $top) } catch { }
+        & $draw @()
     }
 }
 
@@ -170,53 +259,99 @@ function Wait-WatchSync {
 }
 
 function Get-WatchState {
-    # Reads the background guard's heartbeat. Returns @{ Text; Color; Detail }.
+    # Reads the background guard's heartbeat. Returns @{ Text; Color; Detail; Running }.
     $s = Read-WatchStatus
-    if (-not $s -or -not $s.alive) { return @{ Text='NOT RUNNING'; Color='Red'; Detail='new files are not locked  ·  restart the PC or reinstall' } }
+    if (-not $s -or -not $s.alive) { return @{ Text='STOPPED'; Color='Red'; Detail='never started  ·  restart the PC or reinstall'; Running=$false } }
     $age = ((Get-Date) - [datetime]$s.alive).TotalSeconds
-    if ($age -gt 120) { return @{ Text='NOT RUNNING'; Color='Red'; Detail=('last seen {0:yyyy-MM-dd HH:mm}  ·  restart the PC or reinstall' -f [datetime]$s.alive) } }
+    if ($age -gt 120) { return @{ Text='STOPPED'; Color='Red'; Detail=('last seen {0:yyyy-MM-dd HH:mm}' -f [datetime]$s.alive); Running=$false } }
     $d = 'last full check —'
     if ($s.lastFull) { $d = 'last full check {0:HH:mm}' -f [datetime]$s.lastFull }
-    return @{ Text='running'; Color='Gray'; Detail=$d }
+    if ($s.lastLock) { $d += ('  ·  last file locked {0}' -f ((Format-When $s.lastLock) -replace ' today$', '')) }
+    return @{ Text='running'; Color='Green'; Detail=$d; Running=$true }
 }
 
-function Show-Status {
+function Test-ItemLocked([string]$Path) {
+    # true if the user has a deny-delete rule on it
+    try {
+        foreach ($a in (Get-Acl -LiteralPath $Path).Access) {
+            if ($a.AccessControlType -eq 'Deny' -and $a.IdentityReference.Value -ieq $script:User -and $a.FileSystemRights.ToString() -match 'Delete') { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+function Get-FolderState($f) {
+    # What the status block needs for one folder.
+    $st = [ordered]@{ Exists = (Test-Path -LiteralPath $f.path -PathType Container); Files = 0; Newest = $null; Missing = 0; Editing = $false }
+    if (-not $st.Exists) { return [pscustomobject]$st }
+    $files = @(Get-GuardFiles -Folder $f.path)
+    $st.Files = $files.Count
+    $st.Newest = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $st.Editing = [bool]($script:Editing[$f.path] -or $f.editing)
+    if (-not $st.Editing -and $files.Count -le 5000) {
+        $sk = @(Folder-Skip $f)
+        foreach ($x in $files) {
+            if (Test-GuardSkip -Name $x.Name -Extra $sk) { continue }
+            if (-not (Test-ItemLocked $x.FullName)) { $st.Missing++ }
+        }
+    }
+    return [pscustomobject]$st
+}
+
+function Show-FolderBlock($f, [int]$i, $w) {
+    $n = $script:Cfg.folders.Count
+    $mark = ''; if ($i -eq $script:Cfg.current) { $mark = '  ·  current' }
+    $st = Get-FolderState $f
+    $script:FolderStates[$f.path] = $st   # for the next line (not on $f: that would be saved to config.json)
+    if (-not $st.Exists) {
+        Say ("folder    {0,-26} {1} of {2}{3}  ·  NOT FOUND" -f $f.name, ($i+1), $n, $mark) 'Red'
+        Say ("path      {0}" -f $f.path)
+        Say  "files     —"
+        Say  "lock      —"
+        Say ("guard     {0}" -f $w.Text) $w.Color
+        return
+    }
+    Say ("folder    {0,-26} {1} of {2}{3}" -f $f.name, ($i+1), $n, $mark)
+    Say ("path      {0}" -f $f.path)
+    $fl = "files     {0}" -f $st.Files
+    if ($st.Newest) { $fl = "{0,-36} newest  {1}  {2}" -f $fl, $st.Newest.Name, (Format-When $st.Newest.LastWriteTime) }
+    if ($st.Missing -gt 0) {
+        if ($w.Running) { $fl += ("  ·  {0} waiting" -f $st.Missing) } else { $fl += ("  ·  {0} NOT locked" -f $st.Missing) }
+    }
+    Say $fl
+    $what = "owner SYSTEM  ·  folder + folder above"
+    if ($st.Editing) {
+        Say ("lock      {0,-26} editing  ·  locks at next logon" -f 'UNLOCKED') 'Red'
+        Say ("guard     {0,-26} not locking new files while editing" -f $w.Text) $w.Color
+        return
+    }
+    $locked = $st.Files - $st.Missing
+    if ($locked -gt 0) { $what += (" + {0} files" -f $locked) }
+    if ($st.Missing -gt 0 -and -not $w.Running) { Say ("lock      {0,-26} {1}" -f 'PARTIAL', $what) 'Red' }
+    else { Say ("lock      {0,-26} {1}" -f 'LOCKED', $what) 'Green' }
+    Say ("guard     {0,-26} {1}" -f $w.Text, $w.Detail) $w.Color
+}
+
+function Show-Status([switch]$All) {
+    # -All: every protected folder (start, cls). Otherwise only the current one.
     $line = ('-' * 86)
     $w = Get-WatchState
+    $script:FolderStates = @{}
     Say $line
     if ($script:Cfg.folders.Count -eq 0) {
         Say "folder    none yet"
         Say ("guard     {0,-26} nothing to protect" -f $w.Text) $w.Color
-        Say $line
-        Say ""
-        Show-NextLines
-        return
-    }
-    for ($i = 0; $i -lt $script:Cfg.folders.Count; $i++) {
-        $f = $script:Cfg.folders[$i]
-        $mark = ''; if ($i -eq $script:Cfg.current) { $mark = '  ·  current' }
-        $exists = Test-Path -LiteralPath $f.path
-        $nf = ("{0} of {1}" -f ($i+1), $script:Cfg.folders.Count)
-        Say ("folder    {0,-26} {1}{2}" -f $f.name, $nf, $mark)
-        Say ("path      {0}" -f $f.path)
-        if (-not $exists) {
-            Say ("files     —")
-            Say ("lock      —") 'Red'
-            Say ("guard     {0,-26} folder NOT FOUND" -f $w.Text) 'Red'
-        } else {
-            $files = Get-GuardFiles -Folder $f.path
-            $editing = $script:Editing[$f.path] -or $f.editing
-            $lockState = 'LOCKED'; $lockColor = 'Green'
-            if ($editing) { $lockState = 'UNLOCKED'; $lockColor = 'Red' }
-            Say ("files     {0}" -f $files.Count)
-            Say ("lock      {0,-26} owner SYSTEM  ·  folder + folder above + {1} files" -f $lockState, $files.Count) $lockColor
-            Say ("guard     {0,-26} {1}" -f $w.Text, $w.Detail) $w.Color
+    } elseif ($All) {
+        for ($i = 0; $i -lt $script:Cfg.folders.Count; $i++) {
+            Show-FolderBlock $script:Cfg.folders[$i] $i $w
+            if ($i -lt $script:Cfg.folders.Count - 1) { Say "" }
         }
-        if ($i -lt $script:Cfg.folders.Count - 1) { Say "" }
+    } else {
+        Show-FolderBlock (Cur) $script:Cfg.current $w
     }
     Say $line
     Say ""
-    Show-NextLines
+    Show-NextLines $w
 }
 
 # ---- command table --------------------------------------------------------
@@ -263,58 +398,75 @@ skip remove <pattern>     take a pattern out
 
 # ---- commands -------------------------------------------------------------
 function Cmd-List($arg) {
-    if ($arg -eq 'all') {
-        foreach ($f in $script:Cfg.folders) {
-            Say ""; Say ("  {0}   {1}" -f $f.name, $f.path) 'Cyan'
-            Get-GuardFiles -Folder $f.path | Sort-Object LastWriteTime -Descending |
-                ForEach-Object { Say ("   {0,-28} {1:yyyy-MM-dd HH:mm}  {2,8:N0} B" -f $_.Name, $_.LastWriteTime, $_.Length) }
-        }
-        Say ""; return
+    if (-not (Cur)) { Say "  no folder protected yet" 'Red'; return }
+    $targets = @(Cur); if ($arg -eq 'all') { $targets = @($script:Cfg.folders) }
+    $keep = $script:Cfg.current
+    foreach ($f in $targets) {
+        if (-not (Test-Path -LiteralPath $f.path)) { Say ""; Say ("  {0,-14} {1}   NOT FOUND" -f $f.name, $f.path) 'Red'; continue }
+        $script:Cfg.current = [array]::IndexOf(@($script:Cfg.folders), $f)   # Format-Item shows names relative to this folder
+        $items = @(Get-GuardItems $f.path | Sort-Object LastWriteTime -Descending)
+        $nd = @($items | Where-Object { $_.PSIsContainer }).Count
+        $count = N ($items.Count - $nd) 'file'; if ($nd) { $count += (", " + (N $nd 'folder')) }
+        Say ""
+        if ($arg -eq 'all') { Say ("  {0,-14} {1}   {2}" -f $f.name, $f.path, $count) 'Cyan' }
+        else { Say ("  {0}, newest first" -f $count) }
+        $i = 1; foreach ($x in $items) { Say ("  {0,3}  {1}" -f $i, (Format-Item $x)); $i++ }
     }
-    $f = Cur; if (-not $f) { Say "  no folder protected yet" 'Red'; return }
-    $items = @(Get-GuardItems $f.path | Sort-Object LastWriteTime -Descending)
-    $nd = @($items | Where-Object { $_.PSIsContainer }).Count
-    Say ""; Say ("  {0} files, {1} folders, newest first" -f ($items.Count - $nd), $nd)
-    $i = 1; foreach ($x in $items) { Say ("  {0,3}  {1}" -f $i, (Format-Item $x)); $i++ }
+    $script:Cfg.current = $keep
     Say ""
 }
 
 function Cmd-Delete($arg) {
     $f = Cur; if (-not $f) { Say "  no folder protected yet" 'Red'; return }
     if ($arg -eq 'all') {
-        $files = Get-GuardFiles -Folder $f.path
+        $files = @(Get-GuardFiles -Folder $f.path)
         $sz = ($files | Measure-Object Length -Sum).Sum
-        Say ""; Say ("  This empties the folder: {0} files, {1:N0} B." -f $files.Count, $sz)
+        Say ""; Say ("  This empties the folder: {0} files, {1}." -f $files.Count, (Format-Size $sz))
         $a = Read-Line "  type YES to continue, anything else to cancel > "
         if ($a -ne 'YES') { Say "  cancelled"; return }
+        Say ""
         # top level only: a subfolder goes with everything in it
         $top = @(Get-ChildItem -LiteralPath $f.path -Force -EA SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' })
-        $n = 0
-        foreach ($x in $top) { if (Remove-GuardedFile $f $x) { $n++ } }
-        Ok "deleted" ("{0} of {1} items  ·  folder kept, still protected" -f $n, $top.Count); return
+        $failed = 0
+        foreach ($x in $top) { if (-not (Remove-GuardedFile $f $x)) { $failed++ } }
+        $left = @(Get-GuardFiles -Folder $f.path).Count
+        Ok "unlocked" ("{0} files" -f $files.Count)
+        Ok "deleted" ("{0} files" -f ($files.Count - $left))
+        if ($left -eq 0) { Say "  folder is empty and still protected" }
+        else { Say ("  {0} files could not be deleted and are still locked" -f $left) 'Red' }
+        return
     }
     # (not $matches: that is PowerShell's automatic variable, and -match below would overwrite it)
     $hits = @(Find-Matches $f $arg)
     if ($hits.Count -eq 0) { Say "  no file matches `"$arg`"  ·  type  list  to see names"; return }
-    $chosen = @()
-    if ($hits.Count -eq 1) { $chosen = $hits }
-    else {
-        Say ""; Say "  Which files?"
-        $i = 1; foreach ($m in $hits) { Say ("  {0,3}  {1}" -f $i, (Format-Item $m)); $i++ }
-        $a = Read-Line "  type numbers (e.g. 1 3), all, or n > "
-        if ($a -eq 'all') { $chosen = $hits }
-        elseif ($a -match '^(n|no)?$') { Say "  cancelled"; return }
-        else { foreach ($n in ($a -split '\s+')) { if ($n -match '^\d+$' -and [int]$n -ge 1 -and [int]$n -le $hits.Count) { $chosen += $hits[[int]$n-1] } } }
-    }
-    if ($chosen.Count -eq 0) { Say "  nothing chosen"; return }
-    $what = "{0} item(s)" -f $chosen.Count
+    $chosen = @(Pick-Items $hits)
+    if ($chosen.Count -eq 0) { Say "  cancelled"; return }
     $nf = @($chosen | Where-Object { $_.PSIsContainer }).Count
-    if ($nf) { $what += (" ({0} folder(s), with everything inside)" -f $nf) }
-    if (-not (Confirm-YesNo ("Delete {0}?" -f $what))) { Say "  cancelled"; return }
+    if ($chosen.Count -eq 1) {
+        $q = 'Delete this file?'; if ($nf) { $q = 'Delete this folder and everything in it?' }
+    } else {
+        $q = "Delete {0} files?" -f $chosen.Count
+        if ($nf) { $q = "Delete {0} items? ({1} folders, with everything in them)" -f $chosen.Count, $nf }
+    }
+    if (-not (Confirm-YesNo $q)) { Say "  cancelled"; return }
+    Say ""
     foreach ($x in $chosen) {
         if (-not (Test-Path -LiteralPath $x.FullName)) { continue }   # was inside a folder deleted just before
-        if (Remove-GuardedFile $f $x) { Ok "deleted" $x.Name }
+        if (Remove-GuardedFile $f $x) {
+            if ($chosen.Count -eq 1) { Ok "unlocked" $x.Name }
+            Ok "deleted" $x.Name
+        }
     }
+    Say ("  {0} still locked" -f (N @(Get-GuardFiles -Folder $f.path).Count 'file'))
+}
+
+function Pick-Items($hits) {
+    # One match: show it and use it. Many: 'Which files?' picker. Returns the chosen items.
+    if ($hits.Count -eq 1) { Say ""; Say ("  {0}" -f (Format-Item $hits[0] -Where)); return @($hits[0]) }
+    Say ""; Say "  Which files?"
+    $rows = @($hits | ForEach-Object { Format-Item $_ -Where })
+    $nums = @(Select-Items $rows)
+    return @($nums | ForEach-Object { $hits[$_ - 1] })
 }
 
 function Remove-GuardedFile($f, $x) {
@@ -335,7 +487,10 @@ function Remove-GuardedFile($f, $x) {
 function Cmd-Move($arg) {
     $f = Cur; if (-not $f) { Say "  no folder protected yet" 'Red'; return }
     if ($arg -eq 'folder') {
-        $dest = Read-Line "  Where to? type a folder path then Enter > "
+        $nfiles = @(Get-GuardFiles -Folder $f.path).Count
+        Say ""; Say ("  {0}  ·  {1}  ·  {2} files" -f $f.name, $f.path, $nfiles)
+        Say ""; Say "  Where to?"
+        $dest = Read-Line "  type a folder path then Enter > "
         if (-not $dest) { Say "  cancelled"; return }
         # an existing folder = move inside it, keeping the name
         if (Test-Path -LiteralPath $dest -PathType Container) { $dest = Join-Path $dest (Get-FolderName $f.path) }
@@ -346,32 +501,41 @@ function Cmd-Move($arg) {
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $true -Force
         Save-GuardConfig -Config $script:Cfg -User $script:User      # background guard: hands off
         Wait-WatchSync
+        Say ""
         Unlock-GuardTree -Folder $old -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
+        Ok "unlocked" ("folder, folder above, {0} files" -f $nfiles)
         try { Move-Item -LiteralPath $old -Destination $dest -ErrorAction Stop }
         catch {
-            Say "  move failed: $($_.Exception.Message)" 'Red'
+            Say "  FAIL  move  $($_.Exception.Message)" 'Red'
             Lock-GuardTree -Folder $old -User $script:User -Skip (Folder-Skip $f) | Out-Null
             $f.editing = $false; Save-GuardConfig -Config $script:Cfg -User $script:User
+            Say "  not moved. still protected at the old place." 'Red'
             return
         }
+        Ok "moved" $dest
         $f.path = $dest; $f.name = Get-FolderName $dest; $f.editing = $false
         Set-GuardOwnerSystem -Folder $dest -User $script:User | Out-Null   # other drive = new files, new owner
         $r = Lock-GuardTree -Folder $dest -User $script:User -Skip (Folder-Skip $f)
+        Ok "locking" ("folder, folder above ({0}), {1} files" -f (Split-Path (Split-Path $dest -Parent) -Leaf), $r.Locked)
         Save-GuardConfig -Config $script:Cfg -User $script:User
-        Ok "moved" ("{0}  ·  {1} files locked" -f $dest, $r.Locked)
-        Ok "memory" "_guard.json updated  ·  new path saved"
+        Ok "memory" "_guard.json updated in all folders  ·  new path saved"
+        Say ""; Say ("  {0} folder is successfully moved and protected" -f $f.name) 'Green'
+        Say ("  path        {0}" -f $dest)
+        Say  "  note        programs that save here (e.g. the Chrome extension) must be pointed to the new path"
         return
     }
-    $files = @(Find-Matches $f $arg)
     if ($arg -eq 'all') {
         # top level only: subfolders keep their shape at the destination
         $files = @(Get-ChildItem -LiteralPath $f.path -Force -EA SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' })
-        Say ""; Say ("  This copies or cuts everything in the folder: {0} items." -f $files.Count)
-        $a = Read-Line "  type YES to continue, anything else to cancel > "
-        if ($a -ne 'YES') { Say "  cancelled"; return }
+        if ($files.Count -eq 0) { Say "  the folder is empty"; return }
+    } else {
+        $hits = @(Find-Matches $f $arg)
+        if ($hits.Count -eq 0) { Say "  no file matches `"$arg`"  ·  type  list  to see names"; return }
+        $files = @(Pick-Items $hits)
+        if ($files.Count -eq 0) { Say "  cancelled"; return }
     }
-    if ($files.Count -eq 0) { Say "  no file matches `"$arg`""; return }
-    $dest = Read-Line "  Where to? type a folder path then Enter > "
+    Say ""; Say "  Where to?"
+    $dest = Read-Line "  type a folder path then Enter > "
     if (-not $dest) { Say "  cancelled"; return }
     if (-not (Test-Path -LiteralPath $dest)) {
         if (Confirm-YesNo "$dest does not exist. Create it?") { New-Item -ItemType Directory -Path $dest -Force | Out-Null } else { Say "  cancelled"; return }
@@ -382,12 +546,20 @@ function Cmd-Move($arg) {
     $cc = Select-Menu @('cut', 'copy')
     if ($cc -eq 0) { Say "  cancelled"; return }
     $cut = ($cc -eq 1)
+    if ($arg -eq 'all') {
+        $verb = 'copies'; if ($cut) { $verb = 'moves' }
+        Say ""; Say ("  This {0} {1} items." -f $verb, $files.Count)
+        $a = Read-Line "  type YES to continue, anything else to cancel > "
+        if ($a -ne 'YES') { Say "  cancelled"; return }
+    }
+    Say ""
     foreach ($x in $files) {
         if (-not (Test-Path -LiteralPath $x.FullName)) { continue }   # inside a folder moved just before
         $target = Join-Path $dp $x.Name
         if ($cut) {
             Unlock-GuardItem $x
-            try { Move-Item -LiteralPath $x.FullName -Destination $dp -Force -ErrorAction Stop; Give-ToUser $target; Ok "moved" $x.Name }
+            if ($files.Count -eq 1) { Ok "unlocked" $x.Name }
+            try { Move-Item -LiteralPath $x.FullName -Destination $dp -Force -ErrorAction Stop; Give-ToUser $target; Ok "moved" $target }
             catch {
                 # still here (or partly): lock what is left, say so
                 Relock-GuardItem $f $x.FullName
@@ -397,11 +569,12 @@ function Cmd-Move($arg) {
             try {
                 if ($x.PSIsContainer) { Copy-Item -LiteralPath $x.FullName -Destination $dp -Recurse -Force -ErrorAction Stop }
                 else { Copy-Item -LiteralPath $x.FullName -Destination $dp -Force -ErrorAction Stop }
-                Give-ToUser $target; Ok "copied" $x.Name
+                Give-ToUser $target; Ok "copied" $target
             }
             catch { Say ("  FAIL  {0}  not copied  ·  {1}" -f $x.Name, $_.Exception.Message) 'Red' }
         }
     }
+    Say ("  {0} still locked" -f (N @(Get-GuardFiles -Folder $f.path).Count 'file'))
 }
 
 function Cmd-Edit($arg) {
@@ -409,16 +582,25 @@ function Cmd-Edit($arg) {
     if ($arg -eq 'all') { $targets = $script:Cfg.folders } else { $c = Cur; if ($c) { $targets = @($c) } }
     if ($targets.Count -eq 0) { Say "  no folder protected yet" 'Red'; return }
     # tell the background guard first, and wait until it has seen it, then unlock
+    $targets = @($targets | Where-Object { Test-Path -LiteralPath $_.path })
+    if ($targets.Count -eq 0) { Say "  folder not found" 'Red'; return }
     foreach ($f in $targets) {
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $true -Force
         $f | Add-Member -NotePropertyName editingSince -NotePropertyValue ((Get-Date).ToString('o')) -Force
+        $f | Add-Member -NotePropertyName editingFiles -NotePropertyValue (@(Get-GuardFiles -Folder $f.path).Count) -Force
     }
     Save-GuardConfig -Config $script:Cfg -User $script:User
     Wait-WatchSync
     foreach ($f in $targets) {
+        Say ""; Say ("  {0}  ·  {1}  ·  {2} files" -f $f.name, $f.path, $f.editingFiles)
+        Say ""
         Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
         $script:Editing[$f.path] = $true
-        Ok "unlocked" $f.name
+        Ok "unlocked" ("folder + folder above + {0} files" -f $f.editingFiles)
+        if (-not (Test-Quiet)) {
+            # explorer.exe opens the window in the user's normal (not admin) session
+            try { Start-Process explorer.exe -ArgumentList "`"$($f.path)`""; Ok "opened" "in Explorer" } catch { }
+        }
     }
     Say "  edit, save, rename, delete freely. locks again at next logon, or type  resume"
 }
@@ -426,14 +608,27 @@ function Cmd-Edit($arg) {
 function Cmd-Resume($arg) {
     $targets = @()
     if ($arg -eq 'all') { $targets = $script:Cfg.folders } else { $c = Cur; if ($c) { $targets = @($c) } }
+    if ($targets.Count -eq 0) { Say "  no folder protected yet" 'Red'; return }
+    Say ""
     foreach ($f in $targets) {
+        if (-not (Test-Path -LiteralPath $f.path)) { Say ("  {0}  not found: {1}" -f $f.name, $f.path) 'Red'; continue }
+        $now = @(Get-GuardFiles -Folder $f.path).Count
+        $found = "{0} files found" -f $now
+        if ($f.editing -and $null -ne $f.editingFiles) {
+            $d = [int]$f.editingFiles - $now
+            if ($d -gt 0) { $found += (" ({0} deleted while editing)" -f $d) }
+            elseif ($d -lt 0) { $found += (" ({0} added while editing)" -f (-$d)) }
+        }
+        if ($targets.Count -gt 1) { Say ("  {0}" -f $f.name) 'Cyan' }
+        Say ("  full check   {0}" -f $found)
         $r = Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f)
         $script:Editing.Remove($f.path)
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $false -Force
-        Ok "locked" ("{0}  ·  {1} files" -f $f.name, $r.Locked)
+        Write-Host ("  {0} ok" -f ("locked       folder + folder above + {0} files" -f $r.Locked).PadRight(76)) -ForegroundColor Green
+        foreach ($x in $r.Waiting) { Say ("  not locked yet   {0}   {1}" -f $x.Reason, $x.Name) 'Yellow' }
     }
-    if ($targets.Count) { Save-GuardConfig -Config $script:Cfg -User $script:User }
-    if ((Get-WatchState).Text -ne 'running') {
+    Save-GuardConfig -Config $script:Cfg -User $script:User
+    if (-not (Get-WatchState).Running) {
         $how = Start-GuardWatch -Dir $script:InstallDir -User $script:User
         if ($how) { Ok "started" "background guard" }
     }
@@ -445,7 +640,9 @@ function Cmd-Init($arg) {
     $path = (Resolve-Path -LiteralPath $path -ErrorAction SilentlyContinue).Path
     if (-not $path) { Say "  not found: $arg" 'Red'; return }
     if (-not (Test-Path -LiteralPath $path -PathType Container)) { Say "  not a folder: $path" 'Red'; return }
-    foreach ($f in $script:Cfg.folders) { if ($f.path -eq $path) { Say "  already protected  ·  type  use"; return } }
+    for ($k = 0; $k -lt $script:Cfg.folders.Count; $k++) {
+        if ($script:Cfg.folders[$k].path -ieq $path) { Say ("  already protected  ·  it is folder {0}  ·  type  use {0}" -f ($k+1)); return }
+    }
     $bad = Test-GuardPlace $path
     if ($bad) { Say "  $bad" 'Red'; return }
     # a folder that carries guard memory from an earlier install: offer to restore its whole list
@@ -459,26 +656,78 @@ function Cmd-Init($arg) {
         }
     }
     $files = @(Get-GuardFiles -Folder $path)
+    $name = Get-FolderName $path
+    # cloud folders: files that are only in the cloud have nothing on the disk to protect
+    $cloud = @($files | Where-Object { ([int]$_.Attributes -band (0x1000 -bor 0x40000 -bor 0x400000)) -ne 0 })
+    if ($cloud.Count -gt 0) {
+        Say ""; Say ("  {0} files in {1} are only in the cloud, not on this PC:" -f $cloud.Count, $name) 'Red'
+        $cloud | Select-Object -First 5 | ForEach-Object { Say ("    {0}" -f $_.FullName.Substring($path.Length).TrimStart('\')) }
+        if ($cloud.Count -gt 5) { Say ("    ... and {0} more" -f ($cloud.Count - 5)) }
+        Say "  fix       right-click the folder in Explorer > Always keep on this device"
+        Say "            wait until every file shows a green tick, then  init  again"
+        return
+    }
     $sz = ($files | Measure-Object Length -Sum).Sum
-    Say ""; Say ("  {0}  ·  {1}  ·  {2} files  ·  {3:N0} B" -f (Get-FolderName $path), $path, $files.Count, $sz)
+    $facts = "  {0}  ·  {1}  ·  {2} files  ·  {3}" -f $name, $path, $files.Count, (Format-Size $sz)
+    if (-not $arg) { $facts += "  ·  the folder this terminal is in" }
+    Say ""; Say $facts
+    Say "  (Ctrl+C while locking undoes it)" 'DarkGray'
     Say ""
-    Set-GuardOwnerSystem -Folder $path -User $script:User | Out-Null
-    $r = Lock-GuardTree -Folder $path -User $script:User -Skip @()
-    Ok "owner" ("folder + {0} files" -f $files.Count)
-    Ok "locking" "folder + folder above"
-    Ok "locking" ("{0} files" -f $r.Locked)
-    $entry = [pscustomobject]@{ path=$path; name=(Get-FolderName $path); skip=@(); added=(Get-Date).ToString('o') }
+    $hadOthers = $script:Cfg.folders.Count
+
+    # Ctrl+C while locking: stop and undo. Real console only.
+    $stop = $null; $oldTreat = $null
+    try { if (-not [Console]::IsInputRedirected) { $oldTreat = [Console]::TreatControlCAsInput; [Console]::TreatControlCAsInput = $true } } catch { }
+    if ($null -ne $oldTreat) {
+        $stop = {
+            while ([Console]::KeyAvailable) {
+                $k = [Console]::ReadKey($true)
+                if ($k.Key -eq 'C' -and ($k.Modifiers -band [ConsoleModifiers]::Control)) { return $true }
+            }
+            return $false
+        }
+    }
+    try {
+        Set-GuardOwnerSystem -Folder $path -User $script:User | Out-Null
+        $r = Lock-GuardTree -Folder $path -User $script:User -Skip @() -ShouldStop $stop
+    } finally { if ($null -ne $oldTreat) { try { [Console]::TreatControlCAsInput = $oldTreat } catch { } } }
+    if ($r.Stopped) {
+        Unlock-GuardTree -Folder $path -User $script:User -KeepAbove:(Test-AboveShared ([pscustomobject]@{ path = $path })) | Out-Null
+        Set-GuardOwnerUser -Folder $path -User $script:User | Out-Null
+        Say "  cancelled  ·  everything done so far was undone, nothing is locked" 'Yellow'
+        return
+    }
+
+    $above = Split-Path (Split-Path $path -Parent) -Leaf; if (-not $above) { $above = Split-Path $path -Parent }
+    Ok "owner"   ("folder + {0} files" -f $files.Count) "now owned by SYSTEM"
+    Ok "locking" "folder" "can't be deleted or renamed"
+    Ok "locking" ("folder above ({0})" -f $above) "can't delete inside using the folder key"
+    Ok "locking" ("{0} files" -f $r.Locked) "can't be deleted"
+    $entry = [pscustomobject]@{ path=$path; name=$name; skip=@(); added=(Get-Date).ToString('o') }
     $script:Cfg.folders += $entry
     $script:Cfg.current = $script:Cfg.folders.Count - 1
     Save-GuardConfig -Config $script:Cfg -User $script:User
-    Ok "memory" "_guard.json written and locked"
-    if ($r.Waiting.Count -gt 0) {
-        Say ""; Say "  not locked yet"
-        foreach ($w in $r.Waiting) { Say ("    {0}   {1}" -f $w.Reason, $w.Name) }
+    $others = @($script:Cfg.folders | Where-Object { $_.path -ne $path -and (Test-Path -LiteralPath $_.path) }).Count
+    $mem = "_guard.json written and locked"
+    if ($others -eq 1) { $mem += "  ·  updated in 1 other folder" } elseif ($others -gt 1) { $mem += ("  ·  updated in {0} other folders" -f $others) }
+    Ok "memory" $mem
+    if ((Get-WatchState).Running) { Wait-WatchSync; Ok "guard" "told about the new folder" }
+
+    # not locked yet: files still being saved, open in a program
+    $later = @()
+    foreach ($w in $r.Waiting) { $later += [pscustomobject]@{ Reason = $w.Reason; Name = $w.Name } }
+    foreach ($x in $files) { if ($x.Name -like '*.crdownload' -or $x.Name -like '*.part') { $later += [pscustomobject]@{ Reason = 'Chrome can still save'; Name = $x.Name } } }
+    if ($later.Count -gt 0) {
+        Say ""; Say "    not locked yet"
+        foreach ($g in ($later | Group-Object Reason)) {
+            Say ("    {0}  {1,-34} {2}" -f $g.Count, $g.Name, (($g.Group | ForEach-Object Name) -join ', '))
+        }
     }
-    Say ""; Say ("  {0} folder is successfully protected" -f (Get-FolderName $path)) 'Green'
+    Say ""; Say ("  {0} folder is successfully protected" -f $name) 'Green'
     Say ("  path        {0}" -f $path)
-    Say ("  locked      {0} of {1} files" -f $r.Locked, $files.Count)
+    $lk = "  locked      {0} of {1} files" -f $r.Locked, ($files.Count - $r.Skipped)
+    if ($hadOthers -gt 0) { $lk += "  ·  switched to this folder" }
+    Say $lk
 }
 
 function Cmd-Remove($arg) {
@@ -489,71 +738,106 @@ function Cmd-Remove($arg) {
         Say ""; Say ("  This stops protecting {0} folders. Nothing is deleted." -f $targets.Count)
         $a = Read-Line "  type YES to continue, anything else to cancel > "
         if ($a -ne 'YES') { Say "  cancelled"; return }
+    } else {
+        $f = $targets[0]
+        $fc = '—'; if (Test-Path -LiteralPath $f.path) { $fc = "{0} files" -f @(Get-GuardFiles -Folder $f.path).Count }
+        Say ""; Say ("  {0}  ·  {1}  ·  {2}  ·  files stay, nothing is deleted" -f $f.name, $f.path, $fc)
+        if (-not (Confirm-YesNo "Stop protecting this folder?")) { Say "  cancelled"; return }
     }
+    Say ""
+    $wasCur = Cur
     # forget first, so the background guard doesn't lock it again while we unlock
     $keep = @(); foreach ($f in $script:Cfg.folders) { if ($targets -notcontains $f) { $keep += $f } }
     $script:Cfg.folders = $keep
-    if ($script:Cfg.current -ge $script:Cfg.folders.Count) { $script:Cfg.current = [Math]::Max(0, $script:Cfg.folders.Count - 1) }
+    $idx = [array]::IndexOf(@($keep), $wasCur)
+    if ($idx -ge 0) { $script:Cfg.current = $idx } else { $script:Cfg.current = 0 }
     Save-GuardConfig -Config $script:Cfg -User $script:User
     Wait-WatchSync
+    $others = @($keep | Where-Object { Test-Path -LiteralPath $_.path }).Count
     foreach ($f in $targets) {
-        if (-not (Test-Path -LiteralPath $f.path)) { Ok "forgot" $f.name; continue }
+        if (-not (Test-Path -LiteralPath $f.path)) { Ok "forgot" ("{0}  (not found)" -f $f.path); continue }
+        $n = @(Get-GuardFiles -Folder $f.path).Count
         Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
         $jp = Join-Path $f.path '_guard.json'
         Unlock-GuardFile -Path $jp -User $script:User | Out-Null
         Remove-Item -LiteralPath $jp -Force -EA SilentlyContinue
         Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
-        Ok "unlocked" $f.name
+        if ($targets.Count -gt 1) { Say ("  {0}" -f $f.name) 'Cyan' }
+        Ok "unlocked" ("folder, folder above, {0} files" -f $n)
+        Ok "owner" ("folder + {0} files  back to you ({1})" -f $n, ($script:User -split '\\')[-1])
+        $m = "_guard.json deleted here"
+        if ($others -eq 1) { $m += "  ·  updated in 1 other folder" } elseif ($others -gt 1) { $m += ("  ·  updated in {0} other folders" -f $others) }
+        Ok "memory" $m
     }
     Ok "removed" "from guard"
+    if ($script:Cfg.folders.Count -gt 0 -and $targets -contains $wasCur) {
+        Say ("  switched  to {0} of {1}" -f ($script:Cfg.current + 1), $script:Cfg.folders.Count)
+    }
 }
 
 function Cmd-Skip($arg) {
     $f = Cur; if (-not $f) { Say "  no folder protected yet" 'Red'; return }
     if (-not $arg) {
-        Say ""; Say ("  skip list for {0}" -f $f.name)
+        Say ""; Say ("  skip list for {0}  (never locked, can always be deleted)" -f $f.name)
         Say ("    built-in   " + ($script:BuiltinSkip -join '  '))
         $yours = @(Folder-Skip $f); if ($yours.Count -eq 0) { $yours = @('—') }
-        Say ("    yours      " + ($yours -join '  ')); Say ""
+        Say ("    yours      " + ($yours -join '  '))
+        Say  "  skip <pattern>  add  ·  skip all <pattern>  every folder  ·  skip remove <pattern>  take out"
         return
     }
     $parts = $arg -split '\s+', 2
     if ($parts[0] -eq 'remove' -and $parts.Count -eq 2) {
-        $f.skip = @(Folder-Skip $f | Where-Object { $_ -ne $parts[1] })
+        $p = $parts[1]
+        if ($script:BuiltinSkip -contains $p) { Say "  $p is built in and can't be removed" 'Red'; return }
+        if (@(Folder-Skip $f) -notcontains $p) { Say ("  {0} is not in the skip list of {1}" -f $p, $f.name) 'Red'; return }
+        $f.skip = @(Folder-Skip $f | Where-Object { $_ -ne $p })
         Save-GuardConfig -Config $script:Cfg -User $script:User
-        Ok "removed" $parts[1]; return
+        $n = @(Get-GuardFiles -Folder $f.path | Where-Object { $_.Name -like $p }).Count
+        Ok "removed" ("{0}  from {1}  ·  {2} matching files lock at the next full check" -f $p, $f.name, $n); return
     }
     if ($parts[0] -eq 'all' -and $parts.Count -eq 2) {
+        $p = $parts[1]; $n = 0
         foreach ($x in $script:Cfg.folders) {
-            $x.skip = @(@(Folder-Skip $x) + @($parts[1]) | Select-Object -Unique)
-            if (Test-Path -LiteralPath $x.path) { foreach ($y in (Get-GuardFiles -Folder $x.path)) { if ($y.Name -like $parts[1]) { Unlock-GuardFile -Path $y.FullName -User $script:User | Out-Null } } }
+            $x.skip = @(@(Folder-Skip $x) + @($p) | Select-Object -Unique)
+            if (Test-Path -LiteralPath $x.path) { foreach ($y in (Get-GuardFiles -Folder $x.path)) { if ($y.Name -like $p) { Unlock-GuardFile -Path $y.FullName -User $script:User | Out-Null; $n++ } } }
         }
         Save-GuardConfig -Config $script:Cfg -User $script:User
-        Ok "added" ("{0} to all folders" -f $parts[1]); return
+        Ok "added" ("{0}  to all {1} folders" -f $p, $script:Cfg.folders.Count)
+        if ($n) { Ok "unlocked" ("{0} files that match" -f $n) }
+        return
     }
     $f.skip = @(@(Folder-Skip $f) + @($arg) | Select-Object -Unique)
     # unlock anything already locked that now matches
-    foreach ($x in (Get-GuardFiles -Folder $f.path)) { if ($x.Name -like $arg) { Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null } }
+    $n = 0
+    foreach ($x in (Get-GuardFiles -Folder $f.path)) { if ($x.Name -like $arg) { Unlock-GuardFile -Path $x.FullName -User $script:User | Out-Null; $n++ } }
     Save-GuardConfig -Config $script:Cfg -User $script:User
-    Ok "added" ("{0} to {1}" -f $arg, $f.name)
+    Say ""
+    Ok "added" ("{0}  to {1}" -f $arg, $f.name)
+    if ($n) { Ok "unlocked" ("{0} files that match" -f $n) }
 }
 
 function Cmd-Folders {
     Say ""
+    if ($script:Cfg.folders.Count -eq 0) { Say "  no folder protected yet"; return }
     for ($i = 0; $i -lt $script:Cfg.folders.Count; $i++) {
         $f = $script:Cfg.folders[$i]; $star = ' '; if ($i -eq $script:Cfg.current) { $star = '*' }
-        $state = 'LOCKED'; if (-not (Test-Path -LiteralPath $f.path)) { $state = 'NOT FOUND' }
-        Say (" {0} {1}  {2,-14} {3,-45} {4}" -f $star, ($i+1), $f.name, $f.path, $state)
+        if (Test-Path -LiteralPath $f.path) {
+            $st = 'LOCKED'; if ($f.editing) { $st = 'UNLOCKED' }
+            $fc = "{0} files" -f @(Get-GuardFiles -Folder $f.path).Count
+            Say (" {0} {1}  {2,-15} {3,-40} {4,-10} {5}" -f $star, ($i+1), $f.name, $f.path, $fc, $st)
+        } else {
+            Say (" {0} {1}  {2,-15} {3,-40} {4,-10} {5}" -f $star, ($i+1), $f.name, $f.path, '—', 'NOT FOUND') 'Red'
+        }
     }
-    Say ""
+    Say "  type  use <n>  to switch"
 }
 
 function Cmd-Use($arg) {
     if ($arg -match '^\d+$') {
         $n = [int]$arg
         if ($n -ge 1 -and $n -le $script:Cfg.folders.Count) { $script:Cfg.current = $n - 1; Save-GuardConfig -Config $script:Cfg -User $script:User; Say "  switched" }
-        else { Say "  no folder $n" 'Red' }
-    } else { Say "  use <number>" 'Red' }
+        else { Say ("  no folder {0}  ·  type  folders  to see the numbers" -f $n) 'Red' }
+    } else { Say "  use <number>  ·  type  folders  to see the numbers" 'Red' }
 }
 
 # ---- restore (memory from an earlier install) ------------------------------
@@ -623,8 +907,9 @@ $script:HelpShort = [ordered]@{
 }
 $script:HelpLong = @{
     'edit'=@'
-Removes the lock from the folder, the folder above and every file. Save from
-Word, Excel, Photoshop, rename, delete, all work. The background guard stops
+Removes the lock from the folder, the folder above and every file, and opens
+the folder in Explorer. Save from Word, Excel, Photoshop, rename, delete, all
+work. The background guard stops
 locking new files there. Type  resume  to lock again. If you forget, the next
 logon locks everything by itself. While unlocked, AI agents can delete in that
 folder too.
@@ -658,9 +943,10 @@ move folder  moves the protected folder itself to a new path and keeps it
 protected there.
 '@
     'remove'=@'
-Stops protecting the current folder. The lock comes off, you become the owner
-again, normal permissions come back, and its _guard.json is deleted. Files are
-not touched. remove all does every folder and needs  YES.
+Stops protecting the current folder, after one yes / no question. The lock
+comes off, you become the owner again, normal permissions come back, and its
+_guard.json is deleted. Files are not touched. remove all does every folder
+and needs  YES.
 '@
     'skip'=@'
 Files matching a skip pattern are never locked and can always be deleted.
@@ -680,9 +966,51 @@ program folder is deleted. The hidden _guard.json in each folder stays: it is
 the memory, so a future install can restore everything. Files are never deleted.
 '@
 }
+function Show-HelpTable {
+    $t = @"
+
+  -------------------- Guard ---------------------
+
+  folders                 list protected folders with their numbers · * marks the current one
+  use <n>                 make folder number n the current one · numbers come from folders
+  init                    protect the folder the terminal is in · no question asked · locks folder, folder above, every file
+  init <path>             same, for the folder at path
+  update                  install the newest guard from GitHub · protected folders untouched
+  cls                     clear the screen and show the command table and every folder's status again
+  help <command>          longer explanation of one command
+  help all                longer explanation of every command
+  uninstall               remove guard from this PC · unlocks everything, removes the background guard · files stay on the disk
+  exit                    close the guard window · protection keeps running in the background
+
+  ------------ All protected folders -------------
+
+  edit all                unlock every protected folder · locks again at next logon or with resume all
+  resume all              lock every protected folder now
+  remove all              stop protecting every folder · type YES · files stay on the disk
+  skip all <pattern>      add a never-locked pattern to every protected folder
+
+  ---------------- Current folder ----------------
+
+  list                    show files and folders in the current folder, newest first, with date and size
+  delete <name>           delete files or folders · matches by part of the name · picker if many · always asks first
+  delete all              delete everything in the folder · type YES
+  move <name>             copy or cut files or folders · same picking as delete · asks where to, then cut or copy
+  move all                copy or cut everything in the folder · type YES
+  move folder             move the protected folder itself to a new path · stays protected there
+  edit                    unlock the folder and open it in Explorer · save, rename, delete work · locks again at next logon or with resume
+  resume                  lock the folder again now · also happens by itself at every logon
+  remove                  stop protecting the folder · files stay on the disk, just not protected
+  skip                    show files that are never locked and can always be deleted (temp files)
+  skip <pattern>          add a pattern, e.g. skip *.bak
+  skip remove <pattern>   take a pattern out · built-in ones can't be removed
+
+"@
+    Say $t
+}
+
 function Show-Help([string]$what) {
     $what = $what.Trim().ToLower()
-    if (-not $what) { Show-Table; return }
+    if (-not $what) { Show-HelpTable; return }
     if ($what -eq 'all') {
         foreach ($k in $script:HelpShort.Keys) {
             Say ""; Say ("  {0}" -f $k) 'Cyan'
@@ -722,14 +1050,22 @@ function Get-Suggestion([string]$word) {
 }
 
 # ---- error report -----------------------------------------------------------
+function Hide-Paths([string]$t) {
+    # the report never carries file or folder names: C:\Users\me\Tax\x.pdf -> <path>
+    return ($t -replace '[A-Za-z]:\\[^\s"''<>|]*', '<path>' -replace '\\\\[^\s"''<>|]+', '<path>')
+}
+
 function New-GuardIssueUrl([string]$Command, [string]$Message, [string]$Where) {
     # A pre-filled GitHub issue. Opens in the browser; nothing is sent until the user submits it.
+    # Only: guard version, the command word, Windows and PowerShell versions, the error line.
     $os = [Environment]::OSVersion.Version
+    $word = (($Command.Trim() -split '\s+')[0])
+    $Message = Hide-Paths $Message; $Where = Hide-Paths $Where
     $body = @"
-**What I typed**
-``$Command``
+**Command**
+``$word``
 
-**What guard said**
+**Error**
 ``````
 $Message
 $Where
@@ -807,25 +1143,33 @@ function Cmd-Uninstall {
 }
 
 # ---- lines under the status block -----------------------------------------
-function Show-NextLines {
-    $w = Get-WatchState
+function Show-NextLines($w) {
+    # 'update' and 'next' under the status block; 'next' only when something needs you
+    if (-not $w) { $w = Get-WatchState }
     $s = Read-WatchStatus
     $printed = $false
     if ($s -and (Test-GuardNewer $s.latest)) {
         Say "update    New version is available. Type  update  to keep guard up to date." 'Yellow'; $printed = $true
     }
     $next = $null
-    if ($script:Cfg.folders.Count -eq 0) { $next = 'init   (this folder)   /   init <path>' }
+    if ($script:Cfg.folders.Count -eq 0) { $next = 'init / init <path>' }
     else {
-        for ($i = 0; $i -lt $script:Cfg.folders.Count; $i++) {
+        # the first folder with a problem; the current one is checked first
+        $order = @($script:Cfg.current) + @(0..($script:Cfg.folders.Count - 1) | Where-Object { $_ -ne $script:Cfg.current })
+        foreach ($i in $order) {
             $f = $script:Cfg.folders[$i]
             $isCur = ($i -eq $script:Cfg.current)
-            if (-not (Test-Path -LiteralPath $f.path)) {
-                if ($isCur) { $next = 'remove  to forget it  /  init <new path>' } else { $next = "type  use $($i+1)  then  remove  to forget it, or  init <new path>" }
+            $pre = ''; if (-not $isCur) { $pre = "type  use $($i+1)  then  " }
+            $st = $null; if ($script:FolderStates) { $st = $script:FolderStates[$f.path] }
+            if (-not $st) { $st = Get-FolderState $f }
+            if (-not $st.Exists) { $next = "${pre}remove  to forget it  /  init <new path>"; break }
+            if ($st.Editing) { $next = "${pre}resume  when done"; break }
+            if (-not $w.Running) {
+                if ($st.Missing -gt 0) { $next = ("{0}resume   (locks the {1} files and restarts the background guard)" -f $pre, $st.Missing) }
+                else { $next = "${pre}resume   (restarts the background guard)" }
                 break
             }
         }
-        if (-not $next -and $w.Text -ne 'running') { $next = 'resume   (locks everything and restarts the background guard)' }
     }
     if ($next) { Say ("next      {0}" -f $next) 'Yellow'; $printed = $true }
     if ($printed) { Say "" }
@@ -848,7 +1192,7 @@ function Invoke-GuardCommand([string]$raw) {
         'skip'    { Cmd-Skip $arg }
         'folders' { Cmd-Folders }
         'use'     { Cmd-Use $arg }
-        'cls'       { Clear-Host; Show-Table }
+        'cls'       { Clear-Host; Show-Table; $script:ShowAll = $true }
         'help'      { Show-Help $arg }
         'update'    { return (Cmd-Update) }
         'uninstall' { return (Cmd-Uninstall) }

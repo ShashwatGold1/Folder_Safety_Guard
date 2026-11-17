@@ -71,6 +71,7 @@ Check 'GUARD_SOURCE ignored' ($o -match 'source=\r?\n')
 Check 'GUARD_ANSWERS ignored' ($o -match 'answers=\r?\n')
 Check 'GUARD_TASK ignored' ($o -match 'task=guard')
 Set-TestFlag $true   # this test itself needs GUARD_SOURCE / GUARD_ANSWERS; removed at the end
+$env:GUARD_NOBROWSER = '1'   # edit must not open Explorer windows during the test
 
 Section 'icacls errors come back as a result, never throw (review finding 9)'
 . "$src\guard-core.ps1"; $ErrorActionPreference = 'Continue'
@@ -131,6 +132,9 @@ Check 'heartbeat written' (WaitFor { Test-Path "$env:ProgramData\guard\watch-sta
 Section 'init two folders (installed code)'
 . "$prefix\guard-shell.ps1"; $ErrorActionPreference = 'Continue'; $script:User = Get-GuardUser; $script:Cfg = Load-GuardConfig
 Check 'status says running' ((Get-WatchState).Text -eq 'running')
+'part' | Set-Content "$A\cloud-only.png"; $cf = Get-Item "$A\cloud-only.png"; $cf.Attributes = $cf.Attributes -bor [IO.FileAttributes]::Offline
+Check 'cloud-only file: init refuses' ((Out-Of "init $A") -match 'only in the cloud')
+$cf.Attributes = 'Normal'; Remove-Item "$A\cloud-only.png" -Force
 $o = Out-Of "init $A"; Write-Host $o -ForegroundColor DarkGray
 Check 'init A: success line' ($o -match 'Alpha folder is successfully protected')
 $o = Out-Of "init $B"
@@ -183,8 +187,10 @@ Check 'edit A keeps the folder-above rule Beta still needs' (IsLocked $root)
 'while editing' | Set-Content "$A\draft.png"
 Start-Sleep 5
 Check 'background guard leaves an edited folder alone' (-not (IsLocked "$A\draft.png"))
-Check 'status shows UNLOCKED' ((Show-Status 6>&1 | Out-String) -match 'UNLOCKED')
-Invoke-GuardCommand 'resume' 6>&1 | Out-Null
+$st = Show-Status 6>&1 | Out-String
+Check 'status shows UNLOCKED, editing' (($st -match 'UNLOCKED\s+editing') -and ($st -match 'not locking new files while editing') -and ($st -match 'next\s+resume  when done'))
+$o = Out-Of 'resume'
+Check 'resume says what changed' ($o -match 'full check\s+\d+ files found \(1 added while editing\)')
 Check 'resume: draft locked' (IsLocked "$A\draft.png")
 'after resume' | Set-Content "$A\after.png"
 Check 'background guard locks again after resume' (WaitFor { IsLocked "$A\after.png" } 10)
@@ -253,15 +259,13 @@ $gone = $true; try { Remove-Item $out -Recurse -Force -ErrorAction Stop } catch 
 Check 'moved-out items delete normally' $gone
 Q "$A\sub"; $o = Out-Of 'move checkout'
 Check 'move into the protected folder itself refused' ($o -match 'pick a folder outside')
-Q 'no'; $o = Out-Of 'move all'
+Q $env:TEMP 2 'no'; $o = Out-Of 'move all'   # where to, copy, then anything but YES
 Check 'move all: anything but YES cancels' (($o -match 'cancelled') -and (Test-Path "$A\amazon-checkout.png"))
 Q 2; Check 'menu fallback: typed number' ((Select-Menu @('cut','copy') 6>$null) -eq 2)
 Q copy; Check 'menu fallback: typed word' ((Select-Menu @('cut','copy') 6>$null) -eq 2)
 $url = New-GuardIssueUrl -Command 'delete x' -Message 'boom happened' -Where 'at Cmd-Delete'
 Check 'error report: pre-filled GitHub issue link' (($url -like 'https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new?title=guard%20error%3A%20boom*') -and ($url -match 'body=.*boom%20happened'))
-$env:GUARD_NOBROWSER = '1'
 Check 'error report: browser not opened in tests' (-not (Open-GuardIssue $url))
-$env:GUARD_NOBROWSER = ''
 
 # ---------------------------------------------------------------------------
 Section 'move folder'
@@ -320,7 +324,8 @@ Q YES; $o = Out-Of 'delete all'
 $left = @(Get-ChildItem $G -Force | Where-Object { $_.Name -ne '_guard.json' })
 Check 'delete all: empties the folder, subfolders too' ($left.Count -eq 0)
 Check 'delete all: folder itself still there and locked' ((Test-Path $G) -and (IsLocked $G))
-Invoke-GuardCommand 'remove' 6>&1 | Out-Null
+Check 'delete all: says empty and still protected' ($o -match 'folder is empty and still protected')
+Q 1; Invoke-GuardCommand 'remove' 6>&1 | Out-Null
 $gone = $true; try { Remove-Item $G -Recurse -Force -ErrorAction Stop } catch { $gone = $false }
 Check 'remove: drive-root folder deletes normally again' ($gone -and -not (Test-Path $G))
 Check 'C:\ has no deny left for the user' (-not (IsLocked 'C:\'))

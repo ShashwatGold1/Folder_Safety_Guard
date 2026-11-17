@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Continue'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfgDir = Join-Path $env:TEMP ('guardag-' + [guid]::NewGuid().ToString('N'))
 $env:GUARD_CONFIG = Join-Path $cfgDir 'config.json'
+$env:GUARD_NOBROWSER = '1'
 # admin process: guard honours GUARD_CONFIG only with HKLM GUARD_TEST=1 (removed at the end)
 $envKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey, $true); $k.SetValue('GUARD_TEST', '1'); $k.Close()
@@ -55,6 +56,7 @@ Check 'no attack on its own file succeeded' (-not ($r2 -match 'SUCCEEDED'))
 Check 'agent-new.png still exists'          (Test-Path "$folder\agent-new.png")
 
 Write-Host "`n== remove gives everything back ==" -ForegroundColor Cyan
+$script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('1')   # remove asks first
 Invoke-GuardCommand 'remove' | Out-Null
 Check 'owner back to user'           ((Get-Acl $folder).Owner -match 'ojhas')
 Check 'file owner back to user'      ((Get-Acl "$folder\secret.png").Owner -match 'ojhas')

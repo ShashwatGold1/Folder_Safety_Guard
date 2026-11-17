@@ -45,9 +45,10 @@ function Prompt-Loop {
     Clear-Host
     Show-Table
     if ($script:Rebuilt) { Write-Host ("memory    rebuilt from {0}" -f $script:Rebuilt) -ForegroundColor Green }
-    Show-Status
+    Show-Status -All
     Show-AdminWarn
     while ($true) {
+        $script:ShowAll = $false
         Write-Host -NoNewline "guard> "
         $raw = [Console]::ReadLine()
         if ($null -eq $raw) { $raw = 'exit' }   # input closed = exit
@@ -61,8 +62,13 @@ function Prompt-Loop {
             Write-Host  "        something unexpected went wrong in the middle of that command."
             Write-Host  "        type  resume  to make sure everything is locked again."
             $url = New-GuardIssueUrl -Command $raw -Message $msg -Where $at
-            if (Open-GuardIssue $url) { Write-Host "        a GitHub issue opened in your browser, filled in. check it, then press Submit." }
-            else { Write-Host "        please report it here:" ; Write-Host "        https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" -ForegroundColor Cyan }
+            Write-Host ""
+            Write-Host "  Report this on GitHub?  (opens the browser with the report filled in; you only click Submit)"
+            Write-Host "  the report has only the guard, Windows and PowerShell versions and the error line, never file or folder names" -ForegroundColor DarkGray
+            if ((Select-Menu @('yes', 'no')) -eq 1) {
+                if (Open-GuardIssue $url) { Ok "opened" "github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" }
+                else { Write-Host "  open this page:  https://github.com/ShashwatGold1/Folder_Safety_Guard/issues/new" -ForegroundColor Cyan }
+            }
         }
         if (-not $cont) {
             $c = $raw.Trim().ToLower()
@@ -72,7 +78,7 @@ function Prompt-Loop {
             if ($Elevated -and $c -ne 'exit') { Read-Host "  press Enter to close" | Out-Null }
             break
         }
-        Show-Status
+        Show-Status -All:$script:ShowAll    # every folder after cls, only the current one otherwise
     }
 }
 

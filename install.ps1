@@ -39,9 +39,10 @@ if (Test-InstallTestMode) {
 }
 # progress bar on top, redrawn in place after every step (plain lines when output is redirected)
 $script:BarTop = -1; $script:BarWhat = 'installing'; $script:StepN = 0; $script:StepTotal = 8
+$script:StepNames = @('check','uac','folder','files','path','task','guard','memory'); $script:BarTail = ''
 function Bar-Text([int]$n) {
     $w = 30; $fill = [int]($w * $n / $script:StepTotal)
-    return ("guard  {0}   [{1}]  {2,3}%   {3}/{4}" -f $script:BarWhat, (('=' * $fill) + ('-' * ($w - $fill))), [int](100*$n/$script:StepTotal), $n, $script:StepTotal)
+    return ("guard  {0}   [{1}]  {2,3}%   {3}/{4}{5}" -f $script:BarWhat, (('=' * $fill) + ('-' * ($w - $fill))), [int](100*$n/$script:StepTotal), $n, $script:StepTotal, $script:BarTail)
 }
 function Bar-Start {
     Write-Host ""
@@ -65,6 +66,10 @@ function StepOk([string]$name,[string]$detail){ Write-Host ("  ok    {0,-9}  {1}
 function StepFail([string]$name,[string]$detail){ Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red }
 function Done-Pause { if ($Pause) { Write-Host ""; Read-Host "  press Enter to close" | Out-Null } }
 function Fail-Out([string]$problem,[string]$fix) {
+    # the failed step is number StepN+1: every step after it is skipped
+    for ($i = $script:StepN + 1; $i -lt $script:StepNames.Count; $i++) { Write-Host ("  --    {0,-9}  skipped" -f $script:StepNames[$i]) -ForegroundColor DarkGray }
+    $script:BarTail = '   stopped'
+    if ($script:BarTop -ge 0) { Bar-Set } else { Write-Host ""; Write-Host (Bar-Text $script:StepN) }
     Write-Host ""
     Write-Host "  not installed.  do the fix below and try again." -ForegroundColor Red
     Write-Host "  problem   $problem"

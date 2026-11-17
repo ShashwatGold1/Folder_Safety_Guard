@@ -1,5 +1,6 @@
 ﻿# test-shell.ps1 — drives command handlers non-interactively. No admin (current user as owner).
 $script:GuardConfigPath = Join-Path $env:TEMP ('guardtest-' + [guid]::NewGuid().ToString('N') + '\config.json')
+$env:GUARD_NOBROWSER = '1'   # edit must not open Explorer windows during tests
 . "$PSScriptRoot\guard-shell.ps1"
 
 $ErrorActionPreference = 'Continue'
@@ -47,16 +48,31 @@ Invoke-GuardCommand "use 1" | Out-Null
 Check "use 1 -> shots current"       ((Cur).path -eq $shots)
 Feed @()
 Invoke-GuardCommand "use 2" | Out-Null
+$st = Show-Status 6>&1 | Out-String
+Check "status after a command: only the current folder" (($st -match 'docs') -and -not ($st -match 'folder\s+shots'))
+$st = Show-Status -All 6>&1 | Out-String
+Check "status -All (start, cls): every folder" (($st -match 'docs') -and ($st -match 'folder\s+shots'))
+Check "status shows the newest file" ($st -match 'newest  \S+')
+Feed @('2')
+Invoke-GuardCommand "remove" | Out-Null   # asks first: answer no
+Check "remove asks first: no keeps it" ($script:Cfg.folders.Count -eq 2)
+Feed @('1')
 Invoke-GuardCommand "remove" | Out-Null   # removes docs (current=2)
 Check "docs removed from config"     ($script:Cfg.folders.Count -eq 1)
 Check "docs files now deletable"     (TryDelete (Join-Path $docs 'notes.txt'))
 Check "docs _guard.json gone"        (-not (Test-Path (Join-Path $docs '_guard.json')))
+
+Write-Host "`n== look ==" -ForegroundColor Cyan
+Check "sizes in KB / MB" (((Format-Size 1258291) -eq '1.2 MB') -and ((Format-Size 2048) -eq '2.0 KB') -and ((Format-Size 12) -eq '12 B'))
+Check "help: the long table" ((Show-HelpTable 6>&1 | Out-String) -match 'no question asked')
+Check "error report has no paths" (-not ((New-GuardIssueUrl -Command 'delete C:\Users\me\x.png' -Message 'Access to C:\Users\me\x.png is denied' -Where 'at Cmd-Delete') -match 'Users'))
 
 Write-Host "`n== cleanup: remove all, verify unlocked ==" -ForegroundColor Cyan
 Feed @()
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')   # remove all needs YES
 Invoke-GuardCommand "remove all" | Out-Null
 Check "no folders left"              ($script:Cfg.folders.Count -eq 0)
+Check "next line when nothing is protected" ((Show-Status 6>&1 | Out-String) -match 'next\s+init / init <path>')
 Check "shots fully unlocked"         (TryDelete $shots)
 
 # restore folder structure for re-runs
