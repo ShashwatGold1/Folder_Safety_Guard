@@ -783,13 +783,14 @@ admin     running as administrator  ·  no prompt needed
 ```
 guard> update
 
-guard  updating 1.0 → 1.1   [==============================]  100%   6/6
+guard  updating 1.0 → 1.1   [==============================]  100%   8/8
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
-  ok    folder     already there
-  ok    files      guard.ps1 updated · guard.cmd same
+  ok    uac        on · admin rights granted
+  ok    folder     C:\Program Files\guard  (already there)
+  ok    files      1 of 5 files updated · guard.cmd same
   ok    path       already there
-  ok    task       already there
+  ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard restarted
   ok    folders    2 protected folders untouched · 59 files still locked
 

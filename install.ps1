@@ -210,7 +210,7 @@ if ($Update) {
 
 Bar-End
 Write-Host ""
-if ($Update) { Write-Host "  updated successfully." -ForegroundColor Green; Done-Pause; return }
+if ($Update) { Write-Host "  updated successfully." -ForegroundColor Green; Write-Host "  type:  " -NoNewline; Write-Host "guard" -ForegroundColor Cyan; Done-Pause; return }
 Write-Host "  installed successfully." -ForegroundColor Green
 
 if ($restoreFrom) {
