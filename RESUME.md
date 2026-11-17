@@ -9,7 +9,7 @@ All of guard is built and verified on this PC (2026-11-17, admin session).
 | `src\test-shell.ps1` | no | 16 / 16 |
 | `src\test-watch.ps1` | no | 2 / 2 |
 | `src\verify-agent.ps1` | yes | 11 / 11 |
-| `src\verify-e2e.ps1` | yes | 137 / 137 |
+| `src\verify-e2e.ps1` | yes | 138 / 138 |
 
 Run the unit suites with `src\run-tests.ps1`. When elevated, it switches the admin-only test flag
 (HKLM `GUARD_TEST=1`) on for the run and always off again.

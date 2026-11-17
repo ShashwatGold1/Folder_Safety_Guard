@@ -83,7 +83,7 @@ if (-not $self) {
     $text = $null
     if ($Source) { $text = Get-Content (Join-Path (Split-Path $Source -Parent) 'install.ps1') -Raw -Encoding UTF8 }
     else { $text = (Invoke-WebRequest "$repo/install.ps1" -UseBasicParsing).Content }
-    [IO.File]::WriteAllText($self, $text, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($self, $text.TrimStart([char]0xFEFF), (New-Object Text.UTF8Encoding($false)))
     if ((Is-Admin) -or $NoElevate) {
         $fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-ForUser', $who, '-Prefix', $Prefix)
         if ($Source) { $fwd += @('-Source', $Source) }
@@ -136,8 +136,12 @@ try {
     $bom = New-Object Text.UTF8Encoding($true)
     $changed = 0
     foreach ($fn in $runtime) {
-        if ($Source) { $text = Get-Content -LiteralPath (Join-Path $Source $fn) -Raw -Encoding UTF8 }
+        # (-Source reads the raw bytes so a BOM arrives exactly as in a download: tests hit the same path)
+        if ($Source) { $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $Source $fn))) }
         else { $text = (Invoke-WebRequest "$repo/src/$fn" -UseBasicParsing).Content }
+        # a download keeps the file's BOM as a first character; WriteAllText adds one -> two BOMs,
+        # and PowerShell then fails on the stray one. Strip it here.
+        $text = $text.TrimStart([char]0xFEFF)
         $dest = Join-Path $Prefix $fn
         $before = $null; if (Test-Path $dest) { $before = Get-Content -LiteralPath $dest -Raw -Encoding UTF8 }
         if ($before -ne $text) { $changed++ }

@@ -114,6 +114,9 @@ Write-Host $o -ForegroundColor DarkGray
 Check 'installed successfully' ($o -match 'installed successfully')
 Check 'all 5 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
+# (not $b: names ignore case, $b would overwrite $B, the Beta folder)
+$dbl = @(Get-ChildItem "$prefix\*.ps1" | Where-Object { $fb = [IO.File]::ReadAllBytes($_.FullName); -not ($fb[0] -eq 0xEF -and $fb[1] -eq 0xBB -and $fb[2] -eq 0xBF) -or ($fb[3] -eq 0xEF -and $fb[4] -eq 0xBB -and $fb[5] -eq 0xBF) })
+Check 'installed files: exactly one BOM each' ($dbl.Count -eq 0)
 $t = Get-ScheduledTask -TaskName guard -EA SilentlyContinue
 Check 'task "guard" runs as SYSTEM at logon' ($t -and $t.Principal.UserId -match 'SYSTEM' -and $t.Triggers[0].CimClass.CimClassName -match 'Logon')
 Check 'PATH has Program Files\guard' ((Raw-Path) -split ';' -contains $prefix)

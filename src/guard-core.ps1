@@ -77,7 +77,8 @@ function Get-GuardSourceText {
         return Get-Content -LiteralPath $p -Raw -Encoding UTF8 -ErrorAction Stop
     }
     $sub = 'src/'; if ($Name -eq 'install.ps1') { $sub = '' }
-    return (Invoke-WebRequest "$script:GuardRepo/$sub$Name" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content
+    # a download keeps a BOM as its first character: strip it (callers write their own)
+    return (Invoke-WebRequest "$script:GuardRepo/$sub$Name" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content.TrimStart([char]0xFEFF)
 }
 
 function Get-GuardRemoteVersion {
