@@ -48,7 +48,9 @@ function Prompt-Loop {
     Show-Status
     Show-AdminWarn
     while ($true) {
-        $raw = Read-Host "guard"
+        Write-Host -NoNewline "guard> "
+        $raw = [Console]::ReadLine()
+        if ($null -eq $raw) { $raw = 'exit' }   # input closed = exit
         try { $cont = Invoke-GuardCommand $raw }
         catch {
             # never die halfway through a command: say what broke and how to report it

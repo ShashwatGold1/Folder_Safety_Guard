@@ -254,6 +254,7 @@ skip <pattern>            add files that are never locked
 skip remove <pattern>     take a pattern out
 "@
     Say $g 'Gray'
+    Say ""; Say ""
 }
 
 # ---- commands -------------------------------------------------------------
