@@ -182,6 +182,7 @@ while ($true) { try {
         if ((Split-Path $p -Leaf) -eq '_guard.json') { continue }
         $r = Lock-GuardFile -Path $p -User $User -Skip $skip
         if ($r.State -eq 'locked') { $script:LastLock = (Get-Date).ToString('o'); Write-WatchStatus 'locked new file' }
+        if ($r.State -ne 'skipped') { Set-GuardBadgeFile -Path $p -Locked:($r.State -eq 'locked') }   # red badge until it is locked
     }
 
     $sinceUpdate += $tick

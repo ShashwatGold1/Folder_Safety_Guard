@@ -17,6 +17,7 @@ Rules used everywhere below:
 - `init` refuses a whole drive, Windows and program folders, and a folder inside or around another protected folder.
 - `edit` unlocks the current folder and opens it in Explorer. No timer. It locks again at the next logon, or when you type `resume`. While unlocked it is a normal folder: you, Excel, Photoshop, and also AI agents can delete in it.
 - Editing files: Word, Excel, Photoshop, Notepad++ and most programs save by deleting the old file and renaming a new one. Inside a locked folder that delete is blocked, so Save fails. Opening and reading always works. To change files: `edit`, work, `resume`.
+- Explorer shows a badge in the bottom-left corner of every protected folder and file (like Google Drive's): green lock = protected · orange lock with the left leg open = `edit` (unlocked) · red `!` = partly locked (a file guard couldn't lock yet, e.g. open in a program, and every folder above it up to the protected one). Files on the skip list get no badge: they are never locked. Badges change by themselves after `init`, `edit`, `resume`, `remove`, `move`, `skip` and at the background guard's checks. The install restarts Explorer once to load them (open Explorer windows close); `uninstall` takes them off, and their helper file goes at the next PC restart.
 - Cloud folders (OneDrive, Google Drive, Dropbox): allowed only when the files are really on the disk ("Always keep on this device" / "Available offline"). `init` checks and refuses otherwise. A delete made from the phone or the web is blocked on the PC; the file stays here. (v2: guard shows those files and asks keep or delete.)
 - Memory: every protected folder holds a hidden, locked `_guard.json` with all settings and the list of every protected folder. `C:\ProgramData\guard\config.json` is only a fast copy. If any protected folder survives a reinstall, disk move or backup, everything can be restored from it.
 - guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard runs right there in the same terminal window (no new window). Everything inside runs with no more prompts. `exit` returns to the terminal; the next `guard` asks again.
@@ -62,7 +63,7 @@ Done (from a terminal that isn't elevated; the green line appears after the Yes 
 Requesting Admin Access...
 Admin Access Granted Successfully.                                              ← green
 
-guard  installing   [==============================]  100%   8/8
+guard  installing   [==============================]  100%   9/9
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
@@ -71,6 +72,7 @@ guard  installing   [==============================]  100%   8/8
   ok    path       added for all users
   ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard running
+  ok    badges     shown in Explorer · Explorer restarted once to load them
   ok    memory     nothing from an earlier install
 
   Guard is Installed Successfully.                                               ← green
@@ -81,7 +83,7 @@ guard  installing   [==============================]  100%   8/8
 
 Failed (install stops, later steps skipped, problem and fix always at the bottom):
 ```
-guard  installing   [====--------------------------]   13%   1/8   stopped
+guard  installing   [===---------------------------]   11%   1/9   stopped
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   FAIL  uac        User Account Control is turned off
@@ -90,6 +92,7 @@ guard  installing   [====--------------------------]   13%   1/8   stopped
   --    path       skipped
   --    task       skipped
   --    guard      skipped
+  --    badges     skipped
   --    memory     skipped
 
   not installed.  do the fix below and try again.                                ← red
@@ -106,6 +109,7 @@ Another failure example:
 ```
   FAIL  task       Register-ScheduledTask: access denied
   --    guard      skipped
+  --    badges     skipped
   --    memory     skipped
 
   not installed.  do the fix below and try again.                                ← red
@@ -798,15 +802,16 @@ Admin Access Already Granted.                                                   
 ```
 guard> update
 
-guard  updating 1.0 → 1.1   [==============================]  100%   8/8
+guard  updating 1.0 → 1.1   [==============================]  100%   9/9
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
   ok    folder     C:\Program Files\guard  (already there)
-  ok    files      1 of 5 files updated · guard.cmd same
+  ok    files      1 of 6 files updated · guard.cmd same
   ok    path       already there
   ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard restarted
+  ok    badges     shown in Explorer  (already there)
   ok    folders    2 protected folders untouched · 59 files still locked
 
   Guard is Updated Successfully.                                                 ← green
@@ -840,6 +845,7 @@ guard> uninstall
   removed   C:\Windows\guard.cmd                                                 ok
   removed   C:\Program Files\guard                                               ok
   removed   C:\ProgramData\guard                                                 ok
+  removed   Explorer badges                                                      ok
 
   Guard is Uninstalled Successfully.                                             ← green
 PS>
@@ -919,7 +925,7 @@ One small text file: the list of every protected folder (full paths), settings (
 On a fresh install (no `config.json`), the installer looks for `_guard.json` on every drive and in the usual places (Desktop, Documents, Downloads, Pictures, drive roots). Found one → reads the list → checks each folder:
 
 ```
-guard  installing   [==============================]  100%   8/8
+guard  installing   [==============================]  100%   9/9
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
@@ -928,6 +934,7 @@ guard  installing   [==============================]  100%   8/8
   ok    path       added for all users
   ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard running
+  ok    badges     shown in Explorer · Explorer restarted once to load them
   ok    memory     found in C:\Users\ojhas\Downloads\_Screenshots  ·  lists 4 folders
 
   Guard is Installed Successfully.                                               ← green

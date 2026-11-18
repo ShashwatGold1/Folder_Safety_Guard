@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:GuardVersion = '1.0'
 $script:GuardRepo    = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
-$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
+$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
 $script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
 function Test-GuardTestMode {
@@ -304,10 +304,12 @@ function Lock-GuardTree {
         switch ($r.State) {
             'locked'  { $locked++ }
             'skipped' { $skipped++ }
-            'waiting' { $waiting += [pscustomobject]@{ Name=$f.Name; Reason=$r.Reason } }
-            'fail'    { $failed  += [pscustomobject]@{ Name=$f.Name; Reason=$r.Reason } }
+            'waiting' { $waiting += [pscustomobject]@{ Name=$f.Name; Reason=$r.Reason; Path=$f.FullName } }
+            'fail'    { $failed  += [pscustomobject]@{ Name=$f.Name; Reason=$r.Reason; Path=$f.FullName } }
         }
     }
+    # Explorer badges: the files not locked get the red one
+    if (-not $stopped) { Set-GuardBadgeOpen -Folder $Folder -Paths @(@($waiting) + @($failed) | ForEach-Object { $_.Path }) }
     return [pscustomobject]@{
         FolderOk = $folderRes.Ok; FolderRes = $folderRes
         Locked = $locked; Skipped = $skipped; Waiting = $waiting; Failed = $failed; Stopped = $stopped
@@ -325,3 +327,6 @@ function Unlock-GuardTree {
     $folderRes = Unlock-GuardFolder -Folder $Folder -User $User -KeepAbove:$KeepAbove
     return [pscustomobject]@{ FolderOk = $folderRes.Ok; Unlocked = $n }
 }
+
+# the badges Explorer shows on protected folders and files
+. "$PSScriptRoot\guard-badges.ps1"

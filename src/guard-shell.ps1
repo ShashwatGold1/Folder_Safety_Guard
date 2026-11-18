@@ -604,11 +604,12 @@ function Get-FolderState($f) {
     $st.Newest = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $st.Editing = [bool]($script:Editing[$f.path] -or $f.editing)
     if (-not $st.Editing -and $files.Count -le 5000) {
-        $sk = @(Folder-Skip $f)
+        $sk = @(Folder-Skip $f); $open = @()
         foreach ($x in $files) {
             if (Test-GuardSkip -Name $x.Name -Extra $sk) { continue }
-            if (-not (Test-ItemLocked $x.FullName)) { $st.Missing++ }
+            if (-not (Test-ItemLocked $x.FullName)) { $st.Missing++; $open += $x.FullName }
         }
+        Set-GuardBadgeOpen -Folder $f.path -Paths $open   # Explorer: red badge on what isn't locked
     }
     return [pscustomobject]$st
 }
@@ -1509,6 +1510,13 @@ function Cmd-Uninstall {
     $data = Split-Path $script:GuardConfigPath -Parent
     Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue
     Ok "removed" $data
+    # Explorer badges: off now; Explorer keeps their DLL open, so that file (and the program
+    # folder holding it) goes when the PC restarts
+    # (a real install only, never a source checkout)
+    if ((Test-Path -LiteralPath (Join-Path $dir 'guard.cmd')) -and (Remove-GuardBadges -Dir $dir)) {
+        Remove-GuardFileLater $dir -AtRestart
+        Ok "removed" "Explorer badges"
+    }
     Say ""
     Say "  Guard is Uninstalled Successfully." 'Green'
     return $false

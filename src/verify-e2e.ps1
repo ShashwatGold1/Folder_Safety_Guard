@@ -113,7 +113,7 @@ Section 'install (real: Program Files + SYSTEM task)'
 $o = & "$repo\install.ps1" -Source $src -NoElevate 6>&1 | Out-String
 Write-Host $o -ForegroundColor DarkGray
 Check 'Guard is Installed Successfully.' ($o -cmatch 'Guard is Installed Successfully\.')
-Check 'all 5 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
+Check 'all 6 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
 # (not $b: names ignore case, $b would overwrite $B, the Beta folder)
 $dbl = @(Get-ChildItem "$prefix\*.ps1" | Where-Object { $fb = [IO.File]::ReadAllBytes($_.FullName); -not ($fb[0] -eq 0xEF -and $fb[1] -eq 0xBB -and $fb[2] -eq 0xBF) -or ($fb[3] -eq 0xEF -and $fb[4] -eq 0xBB -and $fb[5] -eq 0xBF) })

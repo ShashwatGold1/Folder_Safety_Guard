@@ -27,6 +27,10 @@ The folder, the folder above it and every file inside can no
 longer be deleted or renamed. New files are locked as soon as
 they finish saving. Opening, editing and saving still work.
 
+In Explorer, a badge in the bottom-left corner shows the state
+of every protected folder and file: green lock = protected,
+orange lock = unlocked for editing, red ! = partly locked.
+
 Inside guard:
 - delete <name>  delete something on purpose
 - edit / resume  unlock for a while / lock again

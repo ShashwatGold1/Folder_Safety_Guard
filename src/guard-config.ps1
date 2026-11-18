@@ -37,6 +37,7 @@ function Save-GuardConfig {
     # one stamp for every copy: identical copies, and the background guard can report which it has
     $Config.saved = (Get-Date).ToString('o')
     Write-GuardJsonFile -Path $script:GuardConfigPath -Config $Config
+    Write-GuardBadges -Config $Config   # Explorer badges follow every change
     foreach ($f in $Config.folders) {
         if (-not (Test-Path -LiteralPath $f.path)) { continue }
         $jp = Join-Path $f.path '_guard.json'

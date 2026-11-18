@@ -22,7 +22,7 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $dot = [string][char]0x00B7; $arrow = [string][char]0x2192
 $ErrorActionPreference = 'Stop'
 $repo = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
-$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1')
+$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
 function Is-Admin { $id=[Security.Principal.WindowsIdentity]::GetCurrent(); (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 
 # Test overrides from the environment only when they can't help an attacker: in a process
@@ -41,8 +41,8 @@ if (Test-InstallTestMode) {
     if (-not $Source -and $env:GUARD_SOURCE) { $Source = $env:GUARD_SOURCE }
 }
 # progress bar on top, redrawn in place after every step (plain lines when output is redirected)
-$script:BarTop = -1; $script:BarWhat = 'installing'; $script:StepN = 0; $script:StepTotal = 8
-$script:StepNames = @('check','uac','folder','files','path','task','guard','memory'); $script:BarTail = ''
+$script:BarTop = -1; $script:BarWhat = 'installing'; $script:StepN = 0; $script:StepTotal = 9
+$script:StepNames = @('check','uac','folder','files','path','task','guard','badges','memory'); $script:BarTail = ''
 function Bar-Text([int]$n) {
     $w = 30; $fill = [int]($w * $n / $script:StepTotal)
     return ("guard  {0}   [{1}]  {2,3}%   {3}/{4}{5}" -f $script:BarWhat, (('=' * $fill) + ('-' * ($w - $fill))), [int](100*$n/$script:StepTotal), $n, $script:StepTotal, $script:BarTail)
@@ -50,11 +50,11 @@ function Bar-Text([int]$n) {
 function Bar-Start {
     Write-Host ""
     try {
-        if (-not [Console]::IsOutputRedirected -and [Console]::WindowHeight -ge 14) {
+        if (-not [Console]::IsOutputRedirected -and [Console]::WindowHeight -ge 15) {
             # make room first: in Windows Terminal the buffer is only as tall as the window, and
             # output that scrolls the window would leave the bar redrawing on the wrong line
-            Write-Host -NoNewline ("`n" * 12)
-            [Console]::SetCursorPosition(0, [Console]::CursorTop - 12)
+            Write-Host -NoNewline ("`n" * 13)
+            [Console]::SetCursorPosition(0, [Console]::CursorTop - 13)
             $script:BarTop = [Console]::CursorTop
         }
     } catch { $script:BarTop = -1 }
@@ -262,7 +262,7 @@ $u = $ForUser; if (-not $u) { $u = [Security.Principal.WindowsIdentity]::GetCurr
 if ($Update) {
     $f = $From; if (-not $f) { $f = '?' }; $t2 = $To; if (-not $t2) { $t2 = 'new' }
     $script:BarWhat = "updating $f $arrow $t2"
-    $script:StepNames[7] = 'folders'   # an update's last row (and its dots) checks the folders
+    $script:StepNames[8] = 'folders'   # an update's last row (and its dots) checks the folders
 }
 # right under "Requesting Admin Access..." in the same window; Bar-Start adds the blank line after
 if ($Granted) { Wait-GuardCallerDots $Caller; Write-Host "Admin Access Granted Successfully." -ForegroundColor Green }
@@ -349,7 +349,18 @@ try {
     if ($Update) { StepOk 'guard' 'background guard restarted' } else { StepOk 'guard' 'background guard running' }
 } catch { StepFail 'guard' $_.Exception.Message }
 
-# 8 memory: an earlier install's folders (fresh install only)
+# 8 badges: green / orange / red marks in Explorer on protected folders and files. Not needed
+#   for protection: a failure here is reported and the install goes on.
+if (Test-InstallTestMode) { StepOk 'badges' 'skipped (test)' } else {
+    try {
+        $b = Install-GuardBadges -Dir $Prefix
+        if (Test-Path -LiteralPath $script:GuardConfigPath) { Write-GuardBadges -Config (Read-GuardJson -Path $script:GuardConfigPath) }
+        if ($b -eq 'new') { Restart-GuardExplorer; StepOk 'badges' "shown in Explorer  $dot  Explorer restarted once to load them" }
+        else { StepOk 'badges' 'shown in Explorer  (already there)' }
+    } catch { StepFail 'badges' ("not shown: {0}" -f $_.Exception.Message); $script:StepN++; Bar-Set; Step-Dots }
+}
+
+# 9 memory: an earlier install's folders (fresh install only)
 $restoreFrom = $null
 if ($Update) {
     $c = Load-GuardConfig
