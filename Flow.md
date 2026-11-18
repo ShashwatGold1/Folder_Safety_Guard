@@ -10,7 +10,7 @@ Rules used everywhere below:
 - Questions always look the same: facts first, then the question, then a numbered menu. `>` marks the chosen row; ↑ ↓ moves it, Enter picks; or type the number(s) and Enter. Picked rows turn green. Esc or `n` = back to `guard>` with `cancelled`.
 - Dangerous actions (delete all, move all, remove all, uninstall) have no menu: you must type `YES` (any case: yes, Yes, YES).
 - Tab completes, like cmd: type the first letters, press Tab; Tab again shows the next match, Shift+Tab the one before. It completes command names (`ini` → `init`), `all` / `folder` / `remove`, folder paths after `init` and in "type a folder path" (`init C:\Us` → `init C:\Users`), and file and folder names of the current folder after `delete` and `move`. ↑ ↓ bring back earlier commands, Esc clears the line.
-- Waiting shows moving dots: `.` → `..` → `...` → `.` again. On `Requesting Admin Access` (during and right after the UAC prompt, it then stays as `...`), on the install's `files` step (downloading), and in guard on every slow step: `locking`, `unlocking`, `undoing`, `moving`, `telling the background guard`, `checking for a new version`, `downloading`, `stopping the background guard`. The dots line is wiped when the step is done, and its result row prints in its place.
+- Waiting shows moving dots: `.` → `..` → `...` → `.` again. On `Requesting Admin Access` (during and right after the UAC prompt, it then stays as `...`), on the install's row of the step that is running (`  ..    memory     ...`, replaced by its `ok` row when done), on `checking folders` before a status block that takes longer than a moment, and in guard on every slow step: `locking`, `unlocking`, `undoing`, `moving`, `telling the background guard`, `checking for a new version`, `downloading`, `stopping the background guard`. The dots line is wiped when the step is done, and its result row prints in its place. The blinking cursor is hidden while dots move.
 - `all` works after any command that takes a target: `list all`, `delete all`, `move all`, `edit all`, `resume all`, `remove all`, `help all`.
 - `init` with no path = the folder the terminal is in. `init <path>` = any folder. No question is asked: typing `init` is the answer. Facts line, then locking starts. Ctrl+C during locking undoes what was done so far.
 - `init` protects every file, subfolders included, except files on the skip list (temp files). The skip list is built in (`~$*  *.tmp  *.temp  *.crdownload  *.part  Thumbs.db  desktop.ini`) and you can add to it with `skip`. Subfolders are locked too: they can't be renamed or moved out.
@@ -22,7 +22,7 @@ Rules used everywhere below:
 - guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard runs right there in the same terminal window (no new window). Everything inside runs with no more prompts. `exit` returns to the terminal; the next `guard` asks again.
 - Protected files are owned by SYSTEM, not you. So you, and every program or AI agent running as you, can't delete or unlock them. Only a human clicking Yes on the UAC prompt can. The background guard runs as SYSTEM and locks new files without prompts.
 - Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `Admin Access Already Granted.`
-- Everything guard prints starts one space in from the left edge, `guard>` included (left out of the screens below to keep them short). The install on its own has no margin; run by `update` inside guard it has.
+- Everything guard prints starts one space in from the left edge, `guard>` included, and so does the install from `Requesting Admin Access...` on (left out of the screens below to keep them short).
 - Plain words only. Never shown: ACL, deny, DE, DC, parent, sweep, watcher.
 - Colours: `LOCKED` `running` `ok` green · `PARTIAL` `UNLOCKED` `STOPPED` `NOT locked` `FAIL` red · `update` and warnings yellow.
 
@@ -45,15 +45,15 @@ PS> irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main
 
 Public repo, nothing else needed on the PC. The install needs administrator rights. If the terminal isn't elevated, the UAC prompt appears once; click Yes. The install then runs in the same terminal window, progress bar on top: no new window, nothing to close.
 
-While running (step name at the end of the bar line):
+While running (the running step's row has moving dots, no blinking cursor):
 ```
-guard  installing   [===============---------------]   50%   4/8   path
+guard  installing   [===============---------------]   50%   4/8
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
   ok    folder     C:\Program Files\guard
   ok    files      guard.ps1 · guard.cmd · modules
-  ..    path       adding for all users
+  ..    path       ..                                                          ← . → .. → ... → .
 ```
 
 Done (from a terminal that isn't elevated; the green line appears after the Yes click):
