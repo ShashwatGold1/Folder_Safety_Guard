@@ -41,6 +41,8 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     $cwd = (Get-Location).ProviderPath; if ($cwd.EndsWith('\')) { $cwd += '.' }   # "C:\" would escape the quote
     $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
+    Write-Host ""
+    Write-Host "guard runs as administrator. click Yes on the prompt."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until guard exits
     try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $psi; $p.WaitForExit() }
@@ -73,7 +75,11 @@ if (-not $hadMaster -and $script:MemoryFoundIn) {
 }
 
 function Show-AdminWarn {
-    # opened in a terminal that was already admin: say so once, in green, when guard opens
+    # say once, in green, when guard opens how it got admin rights
+    if ($Elevated) {
+        Write-Host ("uac       prompt accepted  {0}  running as administrator" -f [char]0x00B7) -ForegroundColor Green
+        Write-Host ""
+    }
     if ($script:AdminWarn) {
         Write-Host ("admin     running as administrator  {0}  no prompt needed" -f [char]0x00B7) -ForegroundColor Green
         Write-Host ""
@@ -81,11 +87,12 @@ function Show-AdminWarn {
 }
 
 function Prompt-Loop {
-    Clear-Host
+    # no Clear-Host: guard runs in the user's own terminal, and what was there stays above it
+    Write-Host ""
+    Show-AdminWarn
     Show-Table
     if ($script:Rebuilt) { Write-Host ("memory    rebuilt from {0}" -f $script:Rebuilt) -ForegroundColor Green }
     Show-Status -All
-    Show-AdminWarn
     while ($true) {
         $script:ShowAll = $false
         Write-Host -NoNewline "guard> "

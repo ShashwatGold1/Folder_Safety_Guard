@@ -141,9 +141,11 @@ PS> guard
 guard runs as administrator. click Yes on the prompt.
 ```
 
-UAC prompt → Yes → guard opens in the same terminal window:
+UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
+uac       prompt accepted  ·  running as administrator                          ← green
+
 -------------------- Guard ---------------------
 
 folders                   show all protected folders
@@ -241,9 +243,11 @@ PS> guard
 guard runs as administrator. click Yes on the prompt.
 ```
 
-UAC prompt → Yes → guard opens in the same terminal window:
+UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
+uac       prompt accepted  ·  running as administrator                          ← green
+
 -------------------- Guard ---------------------
 
 folders                   show all protected folders
@@ -772,7 +776,7 @@ Chrome is saving right now:
 
 Update check failed (offline): no update line, nothing else changes.
 
-Started from a terminal that was already running as administrator (no prompt; green, once, when guard opens):
+Started from a terminal that was already running as administrator (no prompt; green, once, at the top when guard opens, in place of the uac line):
 ```
 admin     running as administrator  ·  no prompt needed
 ```
