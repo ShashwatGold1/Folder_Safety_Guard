@@ -17,7 +17,7 @@ Rules used everywhere below:
 - Editing files: Word, Excel, Photoshop, Notepad++ and most programs save by deleting the old file and renaming a new one. Inside a locked folder that delete is blocked, so Save fails. Opening and reading always works. To change files: `edit`, work, `resume`.
 - Cloud folders (OneDrive, Google Drive, Dropbox): allowed only when the files are really on the disk ("Always keep on this device" / "Available offline"). `init` checks and refuses otherwise. A delete made from the phone or the web is blocked on the PC; the file stays here. (v2: guard shows those files and asks keep or delete.)
 - Memory: every protected folder holds a hidden, locked `_guard.json` with all settings and the list of every protected folder. `C:\ProgramData\guard\config.json` is only a fast copy. If any protected folder survives a reinstall, disk move or backup, everything can be restored from it.
-- guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard opens in its own window. Everything inside runs with no more prompts. Close the window, next `guard` asks again.
+- guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard runs right there in the same terminal window (no new window). Everything inside runs with no more prompts. `exit` returns to the terminal; the next `guard` asks again.
 - Protected files are owned by SYSTEM, not you. So you, and every program or AI agent running as you, can't delete or unlock them. Only a human clicking Yes on the UAC prompt can. The background guard runs as SYSTEM and locks new files without prompts.
 - Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `admin     running as administrator  ·  no prompt needed`.
 - Plain words only. Never shown: ACL, deny, DE, DC, parent, sweep, watcher.
@@ -40,7 +40,7 @@ Words the program uses:
 PS> irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex
 ```
 
-Public repo, nothing else needed on the PC. The install needs administrator rights. If the terminal isn't elevated, the UAC prompt appears once; click Yes.
+Public repo, nothing else needed on the PC. The install needs administrator rights. If the terminal isn't elevated, the UAC prompt appears once; click Yes. The install then runs in the same terminal window, progress bar on top: no new window, nothing to close.
 
 While running (step name at the end of the bar line):
 ```
@@ -67,7 +67,8 @@ guard  installing   [==============================]  100%   8/8
   ok    memory     nothing from an earlier install
 
   installed successfully.                                                        ← green
-  open a new terminal and type:  guard                                           ← guard in cyan
+  type:  guard                                                                   ← guard in cyan
+                          (from Command Prompt: "open a new terminal and type:  guard")
 ```
 
 Failed (install stops, later steps skipped, problem and fix always at the bottom):
@@ -140,7 +141,7 @@ PS> guard
 guard runs as administrator. click Yes on the prompt.
 ```
 
-UAC prompt → Yes → guard opens in its own window:
+UAC prompt → Yes → guard opens in the same terminal window:
 
 ```
 -------------------- Guard ---------------------
@@ -240,7 +241,7 @@ PS> guard
 guard runs as administrator. click Yes on the prompt.
 ```
 
-UAC prompt → Yes → guard opens in its own window:
+UAC prompt → Yes → guard opens in the same terminal window:
 
 ```
 -------------------- Guard ---------------------
@@ -531,7 +532,7 @@ guard> resume
 guard>
 ```
 
-`edit all` = every protected folder. `resume` / `resume all` = lock now; also works from a new `guard` window if you closed the old one. Logon locks everything too, with no typing.
+`edit all` = every protected folder. `resume` / `resume all` = lock now; also works from a new `guard` if you exited the old one. Logon locks everything too, with no typing.
 
 While a folder is in edit, it is a normal folder: you, Excel, Photoshop, and also AI agents can delete in it. The status line says so until you `resume`.
 
@@ -680,7 +681,7 @@ guard> help
   help <command>          longer explanation of one command
   help all                longer explanation of every command
   uninstall               remove guard from this PC · unlocks everything, removes the background guard · files stay on the disk
-  exit                    close the guard window · protection keeps running in the background
+  exit                    back to the terminal · protection keeps running in the background
 
   ------------ All protected folders -------------
 

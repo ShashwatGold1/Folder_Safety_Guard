@@ -3,22 +3,61 @@
 #   -NoElevate  tests only: run in this process as-is
 #   -ForUser    the signed-in user, captured BEFORE the UAC click: a standard account elevates
 #               as a different (admin) account, and the locks must be for the real user
-param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '')
+#   -AttachTo   the elevated copy, started hidden: moves into this terminal (the caller's pid)
+#   -OwnWindow  fallback when it couldn't: guard runs in a window of its own
+param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow)
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\guard-shell.ps1"
 
+function Join-CallerConsole([int]$CallerPid) {
+    # leave our own hidden console and use the caller's window instead (same as  sudo  inline)
+    try {
+        Add-Type -Namespace GuardCon -Name K -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr h, bool add);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern System.IntPtr CreateFile(string name, uint access, uint share, System.IntPtr sa, uint mode, uint flags, System.IntPtr tmpl);
+[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr h, uint mask, uint flags);
+[DllImport("kernel32.dll")] public static extern bool SetStdHandle(int which, System.IntPtr h);
+'@
+        [void][GuardCon.K]::FreeConsole()
+        if (-not [GuardCon.K]::AttachConsole($CallerPid)) { return $false }
+        # Ctrl+C must not kill this relay: the caller would return to its prompt with guard still running
+        [void][GuardCon.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)
+        $in  = [GuardCon.K]::CreateFile('CONIN$',  [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+        $out = [GuardCon.K]::CreateFile('CONOUT$', [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+        foreach ($h in $in, $out) { [void][GuardCon.K]::SetHandleInformation($h, 1, 1) }   # inheritable
+        [void][GuardCon.K]::SetStdHandle(-10, $in); [void][GuardCon.K]::SetStdHandle(-11, $out); [void][GuardCon.K]::SetStdHandle(-12, $out)
+        return $true
+    } catch { return $false }
+}
+
 # --- elevation -------------------------------------------------------------
 if (-not (Test-GuardAdmin) -and -not $NoElevate) {
-    # the elevated window starts in System32 and gets no env from us: pass the folder along
+    # the elevated copy starts in System32 and gets no env from us: pass the folder along
     $cwd = (Get-Location).ProviderPath; if ($cwd.EndsWith('\')) { $cwd += '.' }   # "C:\" would escape the quote
     $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Cwd `"$cwd`" -ForUser `"$me`""
-    try { Start-Process powershell.exe -Verb RunAs -ArgumentList $psi }
+    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
+    $enc = [Console]::OutputEncoding
+    # hidden: it moves into this window, and this one waits until guard exits
+    try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $psi; $p.WaitForExit() }
     catch { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red }
+    try { [Console]::OutputEncoding = $enc } catch { }
     return
+}
+if ($AttachTo) {
+    $c = $Cwd; if ($c.EndsWith('\')) { $c += '.' }
+    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Cwd `"$c`" -ForUser `"$ForUser`""
+    if (Join-CallerConsole $AttachTo) {
+        $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $psi
+        $si.UseShellExecute = $false        # inherits the caller's window
+        $p = [Diagnostics.Process]::Start($si); $p.WaitForExit(); exit $p.ExitCode
+    }
+    Start-Process powershell.exe -ArgumentList "$psi -OwnWindow"
+    exit
 }
 if ($Cwd) { try { Set-Location -LiteralPath $Cwd -ErrorAction Stop } catch { } }
 
@@ -74,8 +113,8 @@ function Prompt-Loop {
             $c = $raw.Trim().ToLower()
             if ($c -eq 'exit') { Write-Host "  background guard keeps running. type  guard  to come back." }
             elseif ($c -eq 'update') { Write-Host "  type:  guard" -ForegroundColor Cyan }
-            # the UAC window closes on its own: let the user read update/uninstall results first
-            if ($Elevated -and $c -ne 'exit') { Read-Host "  press Enter to close" | Out-Null }
+            # a window of its own closes on its own: let the user read update/uninstall results first
+            if ($OwnWindow -and $c -ne 'exit') { Read-Host "  press Enter to close" | Out-Null }
             break
         }
         Show-Status -All:$script:ShowAll    # every folder after cls, only the current one otherwise

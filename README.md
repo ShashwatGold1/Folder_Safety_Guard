@@ -14,11 +14,12 @@ Command Prompt (cmd) :
 
     powershell -NoProfile -Command "irm https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main/install.ps1 | iex"
 
-Click Yes on the Windows prompt (UAC must be on).
+Click Yes on the Windows prompt (UAC must be on). Everything runs
+in the same window.
 
 ## Use
 
-Open a new terminal, type  guard , click Yes, then:
+Type  guard  (from Command Prompt: in a new window), click Yes, then:
 
     init
 

@@ -12,7 +12,9 @@ param(
     [switch]$Update,                # called by  guard> update
     [string]$From = '',             # old version, for the update header
     [string]$To = '',               # new version, for the update header
-    [switch]$Pause                  # keep the UAC window open at the end
+    [switch]$Pause,                 # keep a window of its own open at the end
+    [int]$AttachTo = 0,             # the elevated copy, started hidden: moves into the caller's window
+    [switch]$PathReady              # the caller adds guard to its own PATH afterwards
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -46,7 +48,15 @@ function Bar-Text([int]$n) {
 }
 function Bar-Start {
     Write-Host ""
-    try { if (-not [Console]::IsOutputRedirected) { $script:BarTop = [Console]::CursorTop } } catch { $script:BarTop = -1 }
+    try {
+        if (-not [Console]::IsOutputRedirected -and [Console]::WindowHeight -ge 14) {
+            # make room first: in Windows Terminal the buffer is only as tall as the window, and
+            # output that scrolls the window would leave the bar redrawing on the wrong line
+            Write-Host -NoNewline ("`n" * 12)
+            [Console]::SetCursorPosition(0, [Console]::CursorTop - 12)
+            $script:BarTop = [Console]::CursorTop
+        }
+    } catch { $script:BarTop = -1 }
     if ($script:BarTop -ge 0) { Write-Host (Bar-Text 0) }
     Write-Host ""
 }
@@ -83,6 +93,54 @@ function Fail-Out([string]$problem,[string]$fix) {
 # file first, then run that in its own process - elevated through UAC if needed.
 $self = $MyInvocation.MyCommand.Path
 $who = $ForUser; if (-not $who) { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+
+function Join-CallerConsole([int]$CallerPid) {
+    # leave our own hidden console and use the caller's window instead (same as  sudo  inline)
+    try {
+        Add-Type -Namespace GuardCon -Name K -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr h, bool add);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern System.IntPtr CreateFile(string name, uint access, uint share, System.IntPtr sa, uint mode, uint flags, System.IntPtr tmpl);
+[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr h, uint mask, uint flags);
+[DllImport("kernel32.dll")] public static extern bool SetStdHandle(int which, System.IntPtr h);
+'@
+        [void][GuardCon.K]::FreeConsole()
+        if (-not [GuardCon.K]::AttachConsole($CallerPid)) { return $false }
+        # Ctrl+C must not kill this relay: the caller would return to its prompt mid-install
+        [void][GuardCon.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)
+        $in  = [GuardCon.K]::CreateFile('CONIN$',  [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+        $out = [GuardCon.K]::CreateFile('CONOUT$', [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+        foreach ($h in $in, $out) { [void][GuardCon.K]::SetHandleInformation($h, 1, 1) }   # inheritable
+        [void][GuardCon.K]::SetStdHandle(-10, $in); [void][GuardCon.K]::SetStdHandle(-11, $out); [void][GuardCon.K]::SetStdHandle(-12, $out)
+        return $true
+    } catch { return $false }
+}
+function Test-CallerIsCmd {
+    # run as  powershell -Command "irm ... | iex"  from cmd: cmd's own PATH can't be refreshed
+    try {
+        $pp = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+        return ((Get-CimInstance Win32_Process -Filter "ProcessId=$pp").Name -eq 'cmd.exe')
+    } catch { return $false }
+}
+function Add-SessionPath {
+    # this terminal's PATH, so  guard  works here right away (new terminals get it from the machine PATH)
+    if ((Test-Path (Join-Path $Prefix 'guard.cmd')) -and (($env:Path -split ';') -notcontains $Prefix)) { $env:Path = $env:Path.TrimEnd(';') + ';' + $Prefix }
+}
+
+if ($AttachTo) {
+    $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -ForUser `"$who`" -Prefix `"$Prefix`""
+    if ($Source) { $fwd += " -Source `"$Source`"" }
+    if ($PathReady) { $fwd += ' -PathReady' }
+    if (Join-CallerConsole $AttachTo) {
+        $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $fwd
+        $si.UseShellExecute = $false        # inherits the caller's window
+        $p = [Diagnostics.Process]::Start($si); $p.WaitForExit(); exit $p.ExitCode
+    }
+    Start-Process powershell.exe -ArgumentList "$fwd -Pause"
+    exit
+}
+$ready = ((-not $self) -and -not (Test-CallerIsCmd))   # through irm | iex in PowerShell
 if (-not $self) {
     $self = Join-Path $env:TEMP 'guard-install.ps1'
     $text = $null
@@ -93,16 +151,23 @@ if (-not $self) {
         $fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-ForUser', $who, '-Prefix', $Prefix)
         if ($Source) { $fwd += @('-Source', $Source) }
         if ($NoElevate) { $fwd += '-NoElevate' }
+        if ($ready) { $fwd += '-PathReady' }
         & powershell.exe @fwd
+        if ($ready) { Add-SessionPath }
         return
     }
 }
 if (-not (Is-Admin) -and -not $NoElevate) {
-    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Pause -ForUser `"$who`" -Prefix `"$Prefix`""
+    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -AttachTo $PID -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $a += " -Source `"$Source`"" }
+    if ($ready) { $a += ' -PathReady' }
     Write-Host "guard  asking for administrator (UAC)..."
-    try { Start-Process powershell.exe -Verb RunAs -ArgumentList $a }
-    catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red }
+    $enc = [Console]::OutputEncoding
+    # hidden: it moves into this window, and this one waits until the install is done
+    try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a; $p.WaitForExit() }
+    catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; return }
+    try { [Console]::OutputEncoding = $enc } catch { }
+    if ($ready) { Add-SessionPath }
     return
 }
 
@@ -220,5 +285,6 @@ if ($restoreFrom) {
     if (-not $ok) { Save-GuardConfig -Config $script:Cfg -User $u }
     Write-Host ""
 }
-Write-Host -NoNewline "  open a new terminal and type:  "; Write-Host "guard" -ForegroundColor Cyan
+if ($PathReady) { Write-Host -NoNewline "  type:  " } else { Write-Host -NoNewline "  open a new terminal and type:  " }
+Write-Host "guard" -ForegroundColor Cyan
 Done-Pause
