@@ -103,8 +103,6 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
                 $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green' }
                 $rows += ,@(("{0}  {1}{2}" -f $m, $mark, $menu.Items[$i]), $col)
             }
-            $more = ''; if ($n -gt $vis) { $more = "  ·  {0} of {1}" -f ($menu.Sel + 1), $n }
-            $rows += ,@(("{0}    ↑ ↓ pick  ·  Enter use  ·  type to narrow  ·  Esc close{1}" -f $m, $more), 'DarkGray')
         }
         $below = $top + [Math]::Floor([Math]::Max(0, $left + [Math]::Max($buf.Length, 1) - 1) / $w) + 1
         $need = [Math]::Max($rows.Count, $listShown)
