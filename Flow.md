@@ -69,8 +69,9 @@ guard  installing   [==============================]  100%   8/8
 
   installed successfully.                                                        ← green
   type:  guard                                                                   ← guard in cyan
-                          (from Command Prompt: "open a new terminal and type:  guard")
 ```
+
+`guard` works right away in the same window, PowerShell or Command Prompt: besides PATH, the install puts a one-line `guard.cmd` in `C:\Windows`, which every terminal already searches, also ones opened before the install. Only admins can write there.
 
 Failed (install stops, later steps skipped, problem and fix always at the bottom):
 ```
@@ -828,6 +829,7 @@ guard> uninstall
   kept      _guard.json in both folders (memory, so a future install can restore)   ok
   removed   task "guard"                                                         ok
   removed   path entry                                                           ok
+  removed   C:\Windows\guard.cmd                                                 ok
   removed   C:\Program Files\guard                                               ok
   removed   C:\ProgramData\guard                                                 ok
 
@@ -939,7 +941,7 @@ guard  installing   [==============================]  100%   8/8
   memory    _guard.json updated in both  ·  2 missing folders kept in the list  ok
 
   2 folders are successfully protected                                           ← green
-  open a new terminal and type:  guard                                           ← guard in cyan
+  type:  guard                                                                   ← guard in cyan
 ```
 
 - "access" step: files restored to a new Windows with their old permissions can show "access denied" even to open, because to Windows the new account is a different account even with the same name. Restore grants your current account access first, then locks. That is the only place accounts come into it.

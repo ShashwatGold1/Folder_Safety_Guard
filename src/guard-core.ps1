@@ -65,6 +65,20 @@ function Remove-GuardMachinePath([string]$Dir) {
     $keep = @($raw -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ine $Dir.TrimEnd('\')) })
     Set-GuardMachinePath ($keep -join ';'); return $true
 }
+# A one-line guard.cmd in C:\Windows too: that folder is on the PATH of every terminal, also ones
+# opened before the install, whose PATH can't be refreshed. Only admins can write there.
+function Get-GuardShimPath { return (Join-Path $env:SystemRoot 'guard.cmd') }
+function Get-GuardShimText([string]$Dir) { return "@powershell -NoProfile -ExecutionPolicy Bypass -File `"$Dir\guard.ps1`" %*`r`n" }
+function Add-GuardShim([string]$Dir) {
+    $p = Get-GuardShimPath; $t = Get-GuardShimText $Dir
+    if ((Test-Path -LiteralPath $p) -and ([IO.File]::ReadAllText($p) -eq $t)) { return $false }
+    [IO.File]::WriteAllText($p, $t, (New-Object Text.ASCIIEncoding)); return $true
+}
+function Test-GuardShimFor([string]$Dir) {
+    # only ever remove the C:\Windows\guard.cmd that points at this install
+    $p = Get-GuardShimPath
+    return ((Test-Path -LiteralPath $p) -and ([IO.File]::ReadAllText($p) -like "*`"$Dir\guard.ps1`"*"))
+}
 
 function Get-GuardSourceText {
     # Text of one file from the newest guard: GitHub, or GUARD_SOURCE (a local folder) in tests.

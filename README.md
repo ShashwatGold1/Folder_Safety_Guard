@@ -19,7 +19,7 @@ in the same window.
 
 ## Use
 
-Type  guard  (from Command Prompt: in a new window), click Yes, then:
+Type  guard  in the same window, click Yes, then:
 
     init
 

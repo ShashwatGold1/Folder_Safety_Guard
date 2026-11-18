@@ -121,6 +121,11 @@ Check 'installed files: exactly one BOM each' ($dbl.Count -eq 0)
 $t = Get-ScheduledTask -TaskName guard -EA SilentlyContinue
 Check 'task "guard" runs as SYSTEM at logon' ($t -and $t.Principal.UserId -match 'SYSTEM' -and $t.Triggers[0].CimClass.CimClassName -match 'Logon')
 Check 'PATH has Program Files\guard' ((Raw-Path) -split ';' -contains $prefix)
+Check 'C:\Windows\guard.cmd starts this install' ((Get-Content "$env:SystemRoot\guard.cmd" -Raw) -like "*`"$prefix\guard.ps1`"*")
+# an already-open terminal: its PATH is from before the install, guard still resolves
+$found = & cmd.exe /c "set PATH=$env:SystemRoot\system32;$env:SystemRoot&& where guard" 2>$null
+Check 'guard found in a terminal opened before the install' (@($found) -contains "$env:SystemRoot\guard.cmd")
+Check 'install ends with  type:  guard' ($o -match 'type:\s+guard' -and -not ($o -match 'open a new terminal'))
 Check 'PATH kept as REG_EXPAND_SZ, nothing else changed (review finding 10)' (((Path-Kind) -eq 'ExpandString') -and ((Raw-Path) -eq ($rawBefore.TrimEnd(';') + ';' + $prefix)))
 Check 'background guard started' (WaitFor { @(Watchers).Count -ge 1 } 15)
 $w = Watchers | Select-Object -First 1
@@ -378,6 +383,7 @@ Check 'Guard is successfully uninstalled.' ($o -match 'Guard is successfully uni
 Check 'background guard stopped' (WaitFor { @(Watchers).Count -eq 0 } 15)
 Check 'task removed' ($null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
 Check 'Program Files\guard removed' (WaitFor { -not (Test-Path $prefix) } 10)
+Check 'C:\Windows\guard.cmd removed' (WaitFor { -not (Test-Path "$env:SystemRoot\guard.cmd") } 10)
 Check 'ProgramData\guard removed' (-not (Test-Path "$env:ProgramData\guard"))
 Check 'PATH back exactly as before, still REG_EXPAND_SZ' (((Raw-Path) -eq $rawBefore) -and ((Path-Kind) -eq 'ExpandString'))
 Check 'folders owned by you again' ((OwnerOf $A) -match 'ojhas' -and (OwnerOf "$A\amazon-checkout.png") -match 'ojhas' -and (OwnerOf "$B2\invoice.pdf") -match 'ojhas')

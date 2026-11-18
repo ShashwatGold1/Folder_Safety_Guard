@@ -13,8 +13,7 @@ param(
     [string]$From = '',             # old version, for the update header
     [string]$To = '',               # new version, for the update header
     [switch]$Pause,                 # keep a window of its own open at the end
-    [int]$AttachTo = 0,             # the elevated copy, started hidden: moves into the caller's window
-    [switch]$PathReady              # the caller adds guard to its own PATH afterwards
+    [int]$AttachTo = 0              # the elevated copy, started hidden: moves into the caller's window
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -118,22 +117,9 @@ function Join-CallerConsole([int]$CallerPid) {
         return $true
     } catch { return $false }
 }
-function Test-CallerIsCmd {
-    # run as  powershell -Command "irm ... | iex"  from cmd: cmd's own PATH can't be refreshed
-    try {
-        $pp = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
-        return ((Get-CimInstance Win32_Process -Filter "ProcessId=$pp").Name -eq 'cmd.exe')
-    } catch { return $false }
-}
-function Add-SessionPath {
-    # this terminal's PATH, so  guard  works here right away (new terminals get it from the machine PATH)
-    if ((Test-Path (Join-Path $Prefix 'guard.cmd')) -and (($env:Path -split ';') -notcontains $Prefix)) { $env:Path = $env:Path.TrimEnd(';') + ';' + $Prefix }
-}
-
 if ($AttachTo) {
     $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $fwd += " -Source `"$Source`"" }
-    if ($PathReady) { $fwd += ' -PathReady' }
     if (Join-CallerConsole $AttachTo) {
         $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $fwd
         $si.UseShellExecute = $false        # inherits the caller's window
@@ -142,7 +128,6 @@ if ($AttachTo) {
     Start-Process powershell.exe -ArgumentList "$fwd -Pause"
     exit
 }
-$ready = ((-not $self) -and -not (Test-CallerIsCmd))   # through irm | iex in PowerShell
 if (-not $self) {
     $self = Join-Path $env:TEMP 'guard-install.ps1'
     $text = $null
@@ -153,23 +138,19 @@ if (-not $self) {
         $fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-ForUser', $who, '-Prefix', $Prefix)
         if ($Source) { $fwd += @('-Source', $Source) }
         if ($NoElevate) { $fwd += '-NoElevate' }
-        if ($ready) { $fwd += '-PathReady' }
         & powershell.exe @fwd
-        if ($ready) { Add-SessionPath }
         return
     }
 }
 if (-not (Is-Admin) -and -not $NoElevate) {
     $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -AttachTo $PID -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $a += " -Source `"$Source`"" }
-    if ($ready) { $a += ' -PathReady' }
     Write-Host "guard  asking for administrator (UAC)..."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until the install is done
     try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a; $p.WaitForExit() }
     catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; return }
     try { [Console]::OutputEncoding = $enc } catch { }
-    if ($ready) { Add-SessionPath }
     return
 }
 
@@ -234,7 +215,9 @@ $script:User = $u
 
 # 5 path: the raw registry value, so %SystemRoot% and other %VAR% entries stay as they are
 try {
-    if (Add-GuardMachinePath $Prefix) { StepOk 'path' 'added for all users' } else { StepOk 'path' 'already there' }
+    # + C:\Windows\guard.cmd, so  guard  also works in this window and others already open
+    $shim = Add-GuardShim $Prefix
+    if (Add-GuardMachinePath $Prefix) { StepOk 'path' 'added for all users' } elseif ($shim) { StepOk 'path' 'added for open terminals too' } else { StepOk 'path' 'already there' }
 } catch { StepFail 'path' $_.Exception.Message; Fail-Out "couldn't add guard to PATH" 'run the install line again'; return }
 
 # 6 task
@@ -287,6 +270,5 @@ if ($restoreFrom) {
     if (-not $ok) { Save-GuardConfig -Config $script:Cfg -User $u }
     Write-Host ""
 }
-if ($PathReady) { Write-Host -NoNewline "  type:  " } else { Write-Host -NoNewline "  open a new terminal and type:  " }
-Write-Host "guard" -ForegroundColor Cyan
+Write-Host -NoNewline "  type:  "; Write-Host "guard" -ForegroundColor Cyan
 Done-Pause

@@ -1239,15 +1239,16 @@ function Cmd-Uninstall {
         # raw registry value: keeps %SystemRoot% etc. as they are (REG_EXPAND_SZ)
         if (Remove-GuardMachinePath $script:InstallDir) { Ok "removed" "path entry" } else { Ok "removed" "path entry (was not there)" }
     } catch { Say "  FAIL  path: $($_.Exception.Message)" 'Red' }
+    # guard.cmd is still running (it started us): remove it and the folder 2 s after guard
+    # closes, or Windows prints "The system cannot find the path specified."
+    $later = @(); $shimGone = $false
+    $dir = $script:InstallDir.TrimEnd('\')
+    if (Test-GuardShimFor $dir) { $later += "del /f /q `"$(Get-GuardShimPath)`""; $shimGone = $true }
     # only delete a real install folder (has guard.cmd), never a source checkout
-    if (Test-Path -LiteralPath (Join-Path $script:InstallDir 'guard.cmd')) {
-        # guard.cmd is still running (it started us): remove the folder
-        # 2 s after guard closes, or Windows prints
-        # "The system cannot find the path specified."
-        $dir = $script:InstallDir.TrimEnd('\')
-        Start-Process cmd.exe -WindowStyle Hidden -ArgumentList "/c ping -n 3 127.0.0.1 >nul & rd /s /q `"$dir`""
-        Ok "removed" $dir
-    }
+    if (Test-Path -LiteralPath (Join-Path $dir 'guard.cmd')) { $later += "rd /s /q `"$dir`"" }
+    if ($later.Count) { Start-Process cmd.exe -WindowStyle Hidden -ArgumentList ("/c ping -n 3 127.0.0.1 >nul & " + ($later -join ' & ')) }
+    if ($shimGone) { Ok "removed" (Get-GuardShimPath) }
+    if (Test-Path -LiteralPath (Join-Path $dir 'guard.cmd')) { Ok "removed" $dir }
     $data = Split-Path $script:GuardConfigPath -Parent
     Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue
     Ok "removed" $data
