@@ -73,8 +73,21 @@ function Bar-End {
     # redirected output (tests, logs): the bar once, at the end
     if ($script:BarTop -lt 0) { Write-Host ""; Write-Host (Bar-Text $script:StepTotal) }
 }
-function StepOk([string]$name,[string]$detail){ Write-Host ("  ok    {0,-9}  {1}" -f $name,$detail) -ForegroundColor Green; $script:StepN++; Bar-Set }
-function StepFail([string]$name,[string]$detail){ Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red }
+# while a step runs, its row shows moving dots ("  ..    memory     ...") instead of a bare cursor
+$script:StepDots = $null
+function Step-Dots {
+    Stop-InstallDots $script:StepDots; $script:StepDots = $null
+    if ($script:StepN -lt $script:StepNames.Count) { $script:StepDots = Start-InstallDots ("{0}  ..    {1,-9}  " -f $script:M, $script:StepNames[$script:StepN]) }
+}
+function StepOk([string]$name,[string]$detail){
+    Stop-InstallDots $script:StepDots; $script:StepDots = $null
+    Write-Host ("  ok    {0,-9}  {1}" -f $name,$detail) -ForegroundColor Green; $script:StepN++; Bar-Set
+    Step-Dots
+}
+function StepFail([string]$name,[string]$detail){
+    Stop-InstallDots $script:StepDots; $script:StepDots = $null
+    Write-Host ("  FAIL  {0,-9}  {1}" -f $name,$detail) -ForegroundColor Red
+}
 function Done-Pause { if ($Pause) { Write-Host ""; Read-Host "  press Enter to close" | Out-Null } }
 function Fail-Out([string]$problem,[string]$fix) {
     # the failed step is number StepN+1: every step after it is skipped
@@ -96,6 +109,27 @@ $self = $MyInvocation.MyCommand.Path
 # irm | iex inside someone's own script reports THAT script as our path: then there's no file either
 if ($self -and -not (Select-String -LiteralPath $self -SimpleMatch '# install.ps1 - sets guard up' -Quiet)) { $self = $null }
 $who = $ForUser; if (-not $who) { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+
+# One space of margin on the left of every line, like inside guard (same as guard-shell.ps1).
+# Only when run from the file: through  irm | iex  this would replace Write-Host in the user's
+# own session. Real console only; tests and logs get plain text.
+$script:InstallMargin = $false
+if ($self) { try { $script:InstallMargin = -not [Console]::IsOutputRedirected } catch { } }
+if ($script:InstallMargin) {
+    function Write-Host {
+        param([Parameter(Position = 0, ValueFromRemainingArguments = $true)][object[]]$Object,
+              [switch]$NoNewline, [object]$Separator = ' ', [ConsoleColor]$ForegroundColor, [ConsoleColor]$BackgroundColor)
+        $p = @{}
+        foreach ($k in 'NoNewline', 'ForegroundColor', 'BackgroundColor') { if ($PSBoundParameters.ContainsKey($k)) { $p[$k] = $PSBoundParameters[$k] } }
+        $text = (@($Object) | ForEach-Object { "$_" }) -join [string]$Separator
+        try {
+            if ([Console]::CursorLeft -eq 0) { $text = ' ' + $text }
+            $text = $text -replace "`n", "`n "
+        } catch { }
+        Microsoft.PowerShell.Utility\Write-Host $text @p
+    }
+}
+$script:M = ''; if ($script:InstallMargin) { $script:M = ' ' }   # for text written past Write-Host
 
 function Join-CallerConsole([int]$CallerPid) {
     # leave our own hidden console and use the caller's window instead (same as  sudo  inline)
@@ -120,10 +154,11 @@ function Join-CallerConsole([int]$CallerPid) {
     } catch { return $false }
 }
 
-# loading dots: "text." "text.." "text..." from a background thread (same as guard-shell.ps1)
-function Start-GuardDots([string]$Text) {
+# loading dots: "text." "text.." "text..." from a background thread, cursor hidden meanwhile.
+# Own names: guard-shell.ps1 (dot-sourced later) has its own Start-GuardDots. $Text includes the margin.
+function Start-InstallDots([string]$Text) {
     try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
-    if ($GuardMargin) { $Text = ' ' + $Text }   # run by  update  inside guard: guard's margin
+    try { [Console]::CursorVisible = $false } catch { }
     $sync = [hashtable]::Synchronized(@{ Stop = $false })
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
@@ -137,19 +172,20 @@ function Start-GuardDots([string]$Text) {
     }).AddArgument($Text).AddArgument($sync)
     return @{ PS = $ps; Sync = $sync; Run = $ps.BeginInvoke(); Text = $Text }
 }
-function Stop-GuardDots($h, [switch]$Keep) {
+function Stop-InstallDots($h, [switch]$Keep) {
     if (-not $h) { return }
     $h.Sync.Stop = $true
     try { [void]$h.PS.EndInvoke($h.Run) } catch { }
     $h.PS.Dispose()
     if ($Keep) { [Console]::WriteLine("`r" + $h.Text + '...') }
     else { [Console]::Write("`r" + (' ' * ($h.Text.Length + 3)) + "`r") }
+    try { [Console]::CursorVisible = $true } catch { }
 }
 function Request-GuardAdmin([string]$Text, [string]$ArgList) {
     # the UAC prompt with moving dots until the admin copy is about to print here; $null = No
     $ready = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-ready-$PID")
     $shown = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-shown-$PID")
-    $dots = Start-GuardDots $Text
+    $dots = Start-InstallDots $Text
     if (-not $dots) { Write-Host ($Text + '...') }
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({ param($a) try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList)
@@ -166,7 +202,7 @@ function Request-GuardAdmin([string]$Text, [string]$ArgList) {
             if ($p -and ($p.HasExited -or ((Get-Date) - $t0).TotalSeconds -gt 20)) { break }
         }
     } finally {
-        Stop-GuardDots $dots -Keep
+        Stop-InstallDots $dots -Keep
         [void]$shown.Set()
         $ps.Dispose()
     }
@@ -213,8 +249,10 @@ if (-not (Is-Admin) -and -not $NoElevate) {
     Write-Host ""
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until the install is done
-    $p = Request-GuardAdmin 'Requesting Admin Access' $a
-    if (-not $p) { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
+    # (this part runs inside the user's own session through  irm | iex: no Write-Host margin
+    # wrapper here, so the one-space margin is typed in)
+    $p = Request-GuardAdmin ' Requesting Admin Access' $a
+    if (-not $p) { Write-Host " guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
     $p.WaitForExit()
     try { [Console]::OutputEncoding = $enc } catch { }
     return
@@ -224,10 +262,12 @@ $u = $ForUser; if (-not $u) { $u = [Security.Principal.WindowsIdentity]::GetCurr
 if ($Update) {
     $f = $From; if (-not $f) { $f = '?' }; $t2 = $To; if (-not $t2) { $t2 = 'new' }
     $script:BarWhat = "updating $f $arrow $t2"
+    $script:StepNames[7] = 'folders'   # an update's last row (and its dots) checks the folders
 }
 # right under "Requesting Admin Access..." in the same window; Bar-Start adds the blank line after
 if ($Granted) { Wait-GuardCallerDots $Caller; Write-Host "Admin Access Granted Successfully." -ForegroundColor Green }
 Bar-Start
+Step-Dots
 
 # 1 check
 if ($PSVersionTable.PSVersion.Major -lt 5) { StepFail 'check' 'needs PowerShell 5 or newer'; Fail-Out 'PowerShell is too old' 'install Windows Management Framework 5.1, then run the install line again'; return }
@@ -256,8 +296,7 @@ try {
     foreach ($p in $old) { try { Stop-Process -Id $p.ProcessId -Force -EA Stop } catch { } }
     $bom = New-Object Text.UTF8Encoding($true)
     $changed = 0
-    $dl = Start-GuardDots '  ..    files      downloading'
-    try { foreach ($fn in $runtime) {
+    foreach ($fn in $runtime) {
         # (-Source reads the raw bytes so a BOM arrives exactly as in a download: tests hit the same path)
         if ($Source) { $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $Source $fn))) }
         else { $text = (Invoke-WebRequest "$repo/src/$fn" -UseBasicParsing).Content }
@@ -268,7 +307,7 @@ try {
         $before = $null; if (Test-Path $dest) { $before = Get-Content -LiteralPath $dest -Raw -Encoding UTF8 }
         if ($before -ne $text) { $changed++ }
         [IO.File]::WriteAllText($dest, $text, $bom)     # BOM: PowerShell 5.1 reads it as UTF-8
-    } } finally { Stop-GuardDots $dl }   # wiped: the ok row prints on the same line
+    }
     $cmd = "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$Prefix\guard.ps1`" %*`r`n"
     $cmdPath = Join-Path $Prefix 'guard.cmd'
     $cmdSame = (Test-Path $cmdPath) -and ((Get-Content $cmdPath -Raw) -eq $cmd)
@@ -279,7 +318,7 @@ try {
 
 # from here on, guard's own code does the work (PATH, memory, restore)
 . "$Prefix\guard-shell.ps1"
-if (-not $Update) { $script:GuardMargin = $false }   # guard's one-space margin: only inside guard (update)
+$script:GuardMargin = $script:InstallMargin   # guard's Write-Host (now in charge): same margin
 $ErrorActionPreference = 'Stop'
 $script:User = $u
 

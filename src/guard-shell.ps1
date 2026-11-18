@@ -171,13 +171,16 @@ function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $
 # ---- loading dots: "  locking."  "  locking.."  "  locking..."  while a slow step runs ----
 # A background thread redraws the line; the step itself prints nothing meanwhile. Real console
 # only: tests and logs (output redirected) never see the dots.
-function Start-GuardDots([string]$Text) {
+function Start-GuardDots([string]$Text, [int]$DelayMs = 0) {
+    # -DelayMs: draw only if the step takes longer than that (no flicker on quick steps)
     try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
     if ($script:GuardMargin) { $Text = ' ' + $Text }
+    try { [Console]::CursorVisible = $false } catch { }   # the dots show it's working, not a blinking cursor
     $sync = [hashtable]::Synchronized(@{ Stop = $false })
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
-        param($t, $s)
+        param($t, $s, $d)
+        for ($i = 0; $i -lt $d / 50 -and -not $s.Stop; $i++) { Start-Sleep -Milliseconds 50 }
         $n = 0
         while (-not $s.Stop) {
             $n = $n % 3 + 1
@@ -185,7 +188,7 @@ function Start-GuardDots([string]$Text) {
             [Console]::Write("`r" + $t + ('.' * $n) + (' ' * (3 - $n)) + "`r" + $t + ('.' * $n))
             for ($i = 0; $i -lt 4 -and -not $s.Stop; $i++) { Start-Sleep -Milliseconds 100 }
         }
-    }).AddArgument($Text).AddArgument($sync)
+    }).AddArgument($Text).AddArgument($sync).AddArgument($DelayMs)
     return @{ PS = $ps; Sync = $sync; Run = $ps.BeginInvoke(); Text = $Text }
 }
 function Stop-GuardDots($h, [switch]$Keep) {
@@ -196,6 +199,7 @@ function Stop-GuardDots($h, [switch]$Keep) {
     $h.PS.Dispose()
     if ($Keep) { [Console]::WriteLine("`r" + $h.Text + '...') }
     else { [Console]::Write("`r" + (' ' * ($h.Text.Length + 3)) + "`r") }
+    try { [Console]::CursorVisible = $true } catch { }
 }
 function Invoke-WithDots([string]$DotsText, [scriptblock]$DotsDo) {
     # (odd names: the block runs in here and sees these, so they must not hide the caller's)
@@ -515,7 +519,7 @@ function Get-FolderState($f) {
 function Show-FolderBlock($f, [int]$i, $w) {
     $n = $script:Cfg.folders.Count
     $mark = ''; if ($i -eq $script:Cfg.current) { $mark = '  ·  current' }
-    $st = Get-FolderState $f
+    $st = $script:FolderStates[$f.path]; if (-not $st) { $st = Get-FolderState $f }
     $script:FolderStates[$f.path] = $st   # for the next line (not on $f: that would be saved to config.json)
     if (-not $st.Exists) {
         Say ("folder    {0,-26} {1} of {2}{3}  ·  NOT FOUND" -f $f.name, ($i+1), $n, $mark) 'Red'
@@ -551,6 +555,12 @@ function Show-Status([switch]$All) {
     $line = ('-' * 86)
     $w = Get-WatchState
     $script:FolderStates = @{}
+    # count first (big folders take a moment), then print the block in one go
+    $show = @(); if ($All) { $show = @($script:Cfg.folders) } elseif ($script:Cfg.folders.Count) { $show = @(Cur) }
+    if ($show.Count) {
+        $dotsH = Start-GuardDots '  checking folders' 300
+        try { foreach ($f in $show) { $script:FolderStates[$f.path] = Get-FolderState $f } } finally { Stop-GuardDots $dotsH }
+    }
     Say $line
     if ($script:Cfg.folders.Count -eq 0) {
         Say "folder    none yet"
