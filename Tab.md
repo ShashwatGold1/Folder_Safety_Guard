@@ -71,7 +71,6 @@ After `help`, the list is the same table guard shows when it starts: its heading
 ```
  guard> help                                        ← help + space + Tab
              -------------------- Guard ---------------------
-
            > folders                   show all protected folders
              use <n>                   switch to folder n
              init                      protect the folder the terminal is in
@@ -82,16 +81,12 @@ After `help`, the list is the same table guard shows when it starts: its heading
              help all                  explain every command
              uninstall                 remove guard
              exit                      close guard
-
              ------------ All protected folders -------------
-
              edit all                  unlock every folder
              resume all                lock every folder
              remove all                stop protecting every folder
              skip all <pattern>        add files that are never locked, in every folder
-
              ---------------- Current folder ----------------
-
              list                      show files and folders
              delete <name>             delete files or folders
              delete all                delete everything in the folder
@@ -111,23 +106,19 @@ Type `r`: only the matching rows stay, under their headings:
 ```
  guard> help r
              ------------ All protected folders -------------
-
            > resume all                lock every folder
              remove all                stop protecting every folder
-
              ---------------- Current folder ----------------
-
              resume                    lock the folder
              remove                    stop protecting the folder
 ```
 
-Type `li` instead, only one row is left:
+Type `li` instead:
 
 ```
  guard> help li
              ---------------- Current folder ----------------
-
-           > list                      show files and folders
+           > list                      show files and folders  ← only one left
 ```
 
 A list taller than the window scrolls as the mark moves. Other lists show 8 rows at a time.

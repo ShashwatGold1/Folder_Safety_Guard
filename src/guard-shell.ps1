@@ -113,13 +113,9 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
             $last = $null; $selRow = 0
             for ($i = 0; $i -lt $n; $i++) {
                 if ($menu.Groups) {
-                    # help: the start table's headings, a blank line between sections
+                    # help: the start table's headings, no blank lines (Tab.md)
                     $g = $menu.Groups[$i]
-                    if ($g -ne $last) {
-                        if ($null -ne $last) { [void]$disp.Add(@('', 'Gray', -1)) }
-                        [void]$disp.Add(@(($pre + '  ' + $script:TableHeads[$g]), 'Gray', -1)); $last = $g
-                        [void]$disp.Add(@('', 'Gray', -1))
-                    }
+                    if ($g -ne $last) { [void]$disp.Add(@(($pre + '  ' + $script:TableHeads[$g]), 'Gray', -1)); $last = $g }
                 }
                 $label = $menu.Items[$i]; if ($menu.Labels) { $label = $menu.Labels[$i] }
                 $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green'; $selRow = $disp.Count }
