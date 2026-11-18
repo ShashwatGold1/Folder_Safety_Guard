@@ -92,6 +92,8 @@ function Fail-Out([string]$problem,[string]$fix) {
 # session (leaving guard's functions and settings behind in it). So: save ourselves to a temp
 # file first, then run that in its own process - elevated through UAC if needed.
 $self = $MyInvocation.MyCommand.Path
+# irm | iex inside someone's own script reports THAT script as our path: then there's no file either
+if ($self -and -not (Select-String -LiteralPath $self -SimpleMatch '# install.ps1 - sets guard up' -Quiet)) { $self = $null }
 $who = $ForUser; if (-not $who) { $who = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
 
 function Join-CallerConsole([int]$CallerPid) {
