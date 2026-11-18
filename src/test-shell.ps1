@@ -16,7 +16,7 @@ function TryDelete($p){ try { Remove-Item -LiteralPath $p -Force -Recurse -EA St
 
 Write-Host "== init shots (no path given variant uses arg) ==" -ForegroundColor Cyan
 Feed @()
-Invoke-GuardCommand "init $shots" | Out-Null
+Invoke-GuardCommand "init `"$shots`"" | Out-Null   # quoted, as  init "C:\My Folder"
 Check "shots added to config"        ($script:Cfg.folders.Count -eq 1)
 Check "current is shots"             ((Cur).path -eq $shots)
 Check "shots .png locked on disk"    (-not (TryDelete (Join-Path $shots 'gumroad-settings.png')))
@@ -61,6 +61,22 @@ Invoke-GuardCommand "remove" | Out-Null   # removes docs (current=2)
 Check "docs removed from config"     ($script:Cfg.folders.Count -eq 1)
 Check "docs files now deletable"     (TryDelete (Join-Path $docs 'notes.txt'))
 Check "docs _guard.json gone"        (-not (Test-Path (Join-Path $docs '_guard.json')))
+
+Write-Host "`n== Tab completion ==" -ForegroundColor Cyan
+function Tab([string]$l, [switch]$Paths) { $c = Get-GuardCompletions $l -Paths:$Paths; return @($c.Items | ForEach-Object { $c.Base + $_ }) }
+Check "Tab: command name"            (((Tab 'ini') -join '|') -eq 'init')
+Check "Tab: several commands cycle"  (((Tab 'e') -join '|') -eq 'edit|exit')
+Check "Tab: help <command>"          ((Tab 'help li') -contains 'help list')
+Check "Tab: edit all"                (((Tab 'edit a') -join '|') -eq 'edit all')
+Check "Tab: init path, folders only" (((Tab "init $root\sh") -join '|') -eq "init $root\shots")
+Push-Location $root
+Check "Tab: init relative path"      (((Tab 'init do') -join '|') -eq 'init docs')
+Pop-Location
+Check "Tab: init C: -> C:\"          (((Tab 'init C:') -join '|') -eq 'init C:\')
+Check "Tab: a folder path question"  (((Tab "$root\do" -Paths) -join '|') -eq "$root\docs")
+Check "Tab: delete <file name>"      ((Tab 'delete gum') -contains 'delete gumroad-settings.png')
+Check "Tab: move folder"             ((Tab 'move fo') -contains 'move folder')
+Check "Tab: nothing to complete"     (@(Tab 'zzz').Count -eq 0)
 
 Write-Host "`n== look ==" -ForegroundColor Cyan
 Check "sizes in KB / MB" (((Format-Size 1258291) -eq '1.2 MB') -and ((Format-Size 2048) -eq '2.0 KB') -and ((Format-Size 12) -eq '12 B'))

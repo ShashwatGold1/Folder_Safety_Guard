@@ -9,6 +9,7 @@ Rules used everywhere below:
 - `<name>` is a partial match. One match → acts. Many → numbered picker.
 - Questions always look the same: facts first, then the question, then a numbered menu. `>` marks the chosen row; ↑ ↓ moves it, Enter picks; or type the number(s) and Enter. Picked rows turn green. Esc or `n` = back to `guard>` with `cancelled`.
 - Dangerous actions (delete all, move all, remove all, uninstall) have no menu: you must type `YES` (any case: yes, Yes, YES).
+- Tab completes, like cmd: type the first letters, press Tab; Tab again shows the next match, Shift+Tab the one before. It completes command names (`ini` → `init`), `all` / `folder` / `remove`, folder paths after `init` and in "type a folder path" (`init C:\Us` → `init C:\Users`), and file and folder names of the current folder after `delete` and `move`. ↑ ↓ bring back earlier commands, Esc clears the line.
 - `all` works after any command that takes a target: `list all`, `delete all`, `move all`, `edit all`, `resume all`, `remove all`, `help all`.
 - `init` with no path = the folder the terminal is in. `init <path>` = any folder. No question is asked: typing `init` is the answer. Facts line, then locking starts. Ctrl+C during locking undoes what was done so far.
 - `init` protects every file, subfolders included, except files on the skip list (temp files). The skip list is built in (`~$*  *.tmp  *.temp  *.crdownload  *.part  Thumbs.db  desktop.ini`) and you can add to it with `skip`. Subfolders are locked too: they can't be renamed or moved out.
@@ -829,7 +830,8 @@ guard> uninstall
   removed   path entry                                                           ok
   removed   C:\Program Files\guard                                               ok
   removed   C:\ProgramData\guard                                                 ok
-  done. bye.
+
+  Guard is successfully uninstalled.                                             ← green
 PS>
 ```
 

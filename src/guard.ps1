@@ -95,8 +95,7 @@ function Prompt-Loop {
     Show-Status -All
     while ($true) {
         $script:ShowAll = $false
-        Write-Host -NoNewline "guard> "
-        $raw = [Console]::ReadLine()
+        $raw = Read-GuardInput "guard> "
         if ($null -eq $raw) { $raw = 'exit' }   # input closed = exit
         try { $cont = Invoke-GuardCommand $raw }
         catch {

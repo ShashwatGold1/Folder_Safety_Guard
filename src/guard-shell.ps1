@@ -9,7 +9,121 @@ $script:User = $null
 $script:Editing = @{}   # path -> $true while a folder is in 'edit' (unlocked) state
 
 # ---- input / output -------------------------------------------------------
-function Read-Line([string]$Prompt) {
+$script:GuardCommands = @('list','delete','move','edit','resume','init','remove','skip','folders','use','cls','help','update','uninstall','exit')
+$script:History = New-Object System.Collections.Generic.List[string]
+
+function Get-PathCompletions([string]$typed, [switch]$Dirs) {
+    # "C:\Us" -> C:\Users ; "..\do" -> ..\docs ; relative to the terminal's folder, like cmd
+    $typed = $typed.TrimStart('"')
+    $cut = $typed.LastIndexOfAny([char[]]'\/')
+    $dir = ''; $pre = $typed
+    if ($cut -ge 0) { $dir = $typed.Substring(0, $cut + 1); $pre = $typed.Substring($cut + 1) }
+    elseif ($typed -match '^[A-Za-z]:$') { return @($typed + '\') }
+    $base = $dir; if (-not $base) { $base = (Get-Location).ProviderPath }
+    elseif (-not [IO.Path]::IsPathRooted($base)) { $base = Join-Path (Get-Location).ProviderPath $base }
+    $items = @(Get-ChildItem -LiteralPath $base -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($pre, [StringComparison]::OrdinalIgnoreCase) })
+    if ($Dirs) { $items = @($items | Where-Object { $_.PSIsContainer }) }
+    return @($items | Sort-Object Name | ForEach-Object { $dir + $_.Name })
+}
+
+function Get-GuardCompletions([string]$line, [switch]$Paths) {
+    # what Tab can put in place of the word being typed: @{ Base = text kept; Items = choices }
+    if ($Paths) { return @{ Base = ''; Items = @(Get-PathCompletions $line -Dirs) } }
+    $lead = $line.Length - $line.TrimStart().Length
+    $t = $line.TrimStart()
+    if ($t -notmatch '\s') {   # still typing the command
+        return @{ Base = $line.Substring(0, $lead); Items = @($script:GuardCommands | Where-Object { $_.StartsWith($t, [StringComparison]::OrdinalIgnoreCase) }) }
+    }
+    $m = [regex]::Match($t, '^(\S+\s+)(.*)$')
+    $cmd = $m.Groups[1].Value.Trim().ToLower(); $arg = $m.Groups[2].Value
+    $base = $line.Substring(0, $lead) + $m.Groups[1].Value
+    $words = @()
+    switch ($cmd) {
+        'init'   { return @{ Base = $base; Items = @(Get-PathCompletions $arg -Dirs) } }
+        'help'   { $words = @('all') + $script:GuardCommands }
+        'use'    { $words = @(1..([Math]::Max(1, @($script:Cfg.folders).Count)) | ForEach-Object { "$_" }) }
+        'skip'   { $words = @('all', 'remove') }
+        { $_ -in 'edit','resume','remove' } { $words = @('all') }
+        { $_ -in 'list' } { $words = @('all') }
+        { $_ -in 'delete','move' } {
+            $words = @('all'); if ($cmd -eq 'move') { $words += 'folder' }
+            $f = $null; if ($script:Cfg -and @($script:Cfg.folders).Count) { $f = Cur }
+            if ($f -and (Test-Path -LiteralPath $f.path)) {
+                $words += @(Get-GuardItems $f.path | Select-Object -First 5000 | ForEach-Object { $_.Name } | Sort-Object -Unique)
+            }
+        }
+    }
+    return @{ Base = $base; Items = @($words | Where-Object { $_.StartsWith($arg, [StringComparison]::OrdinalIgnoreCase) }) }
+}
+
+function Read-GuardInput([string]$Prompt, [switch]$Paths) {
+    # one line from the keyboard, with Tab completion (cmd style: Tab again = next choice,
+    # Shift+Tab = back), Up/Down = earlier lines, Esc = clear. Plain ReadLine when piped.
+    Write-Host -NoNewline $Prompt
+    $piped = $true; try { $piped = [Console]::IsInputRedirected } catch { }
+    if ($piped) { return [Console]::ReadLine() }
+    $buf = ''; $pos = 0; $shown = 0
+    $top = [Console]::CursorTop; $left = [Console]::CursorLeft
+    $hist = $script:History.Count; $saved = ''
+    $tabs = $null; $ti = -1; $tail = ''
+    $draw = {   # dot-sourced: updates $top / $shown right here
+        $w = [Console]::BufferWidth
+        [Console]::SetCursorPosition($left, $top)
+        $pad = [Math]::Max(0, $shown - $buf.Length)
+        [Console]::Write($buf + (' ' * $pad))
+        # writing past the bottom scrolls the window: the line start moved up with it
+        $end = $left + $buf.Length + $pad
+        $want = $top + [Math]::Floor([Math]::Max(0, $end - 1) / $w)
+        if ($end -gt 0 -and [Console]::CursorTop -lt $want) { $top -= ($want - [Console]::CursorTop) }
+        $at = $left + $pos
+        [Console]::SetCursorPosition($at % $w, $top + [Math]::Floor($at / $w))
+        $shown = $buf.Length
+    }
+    while ($true) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -ne 'Tab') { $tabs = $null }
+        switch ($k.Key) {
+            'Enter'     {
+                $pos = $buf.Length; . $draw; [Console]::WriteLine()
+                if ($buf.Trim() -and -not $Paths) { $script:History.Add($buf) }
+                return $buf
+            }
+            'Tab'       {
+                if ($null -eq $tabs) {
+                    $c = Get-GuardCompletions $buf.Substring(0, $pos) -Paths:$Paths
+                    if (@($c.Items).Count) { $tabs = @{ Base = $c.Base; Items = @($c.Items) }; $tail = $buf.Substring($pos); $ti = -1 }
+                }
+                if ($tabs) {
+                    $n = $tabs.Items.Count
+                    if ($k.Modifiers -band [ConsoleModifiers]::Shift) { $ti = ($ti - 1 + $n) % $n } else { $ti = ($ti + 1) % $n }
+                    $head = $tabs.Base + $tabs.Items[$ti]
+                    $buf = $head + $tail; $pos = $head.Length
+                }
+            }
+            'Backspace' { if ($pos -gt 0) { $buf = $buf.Remove($pos - 1, 1); $pos-- } }
+            'Delete'    { if ($pos -lt $buf.Length) { $buf = $buf.Remove($pos, 1) } }
+            'LeftArrow' { if ($pos -gt 0) { $pos-- } }
+            'RightArrow'{ if ($pos -lt $buf.Length) { $pos++ } }
+            'Home'      { $pos = 0 }
+            'End'       { $pos = $buf.Length }
+            'Escape'    { $buf = ''; $pos = 0 }
+            'UpArrow'   {
+                if ($hist -gt 0) { if ($hist -eq $script:History.Count) { $saved = $buf }; $hist--; $buf = $script:History[$hist]; $pos = $buf.Length }
+            }
+            'DownArrow' {
+                if ($hist -lt $script:History.Count) {
+                    $hist++; if ($hist -eq $script:History.Count) { $buf = $saved } else { $buf = $script:History[$hist] }; $pos = $buf.Length
+                }
+            }
+            default     {
+                if ($k.KeyChar -and -not [char]::IsControl($k.KeyChar)) { $buf = $buf.Insert($pos, [string]$k.KeyChar); $pos++ }
+            }
+        }
+        . $draw
+    }
+}
+
+function Read-Line([string]$Prompt, [switch]$Paths) {
     # tests: answers come from a queue, or from GUARD_ANSWERS ("1;YES;...") across processes.
     # GUARD_ANSWERS is ignored in an admin process unless an admin set HKLM GUARD_TEST=1, so an
     # agent can't pre-answer YES prompts with setx.
@@ -25,8 +139,7 @@ function Read-Line([string]$Prompt) {
         return $v
     }
     # not Read-Host: it always adds ': ' after the prompt
-    Write-Host -NoNewline $Prompt
-    $v = [Console]::ReadLine()
+    $v = Read-GuardInput $Prompt -Paths:$Paths
     if ($null -eq $v) { return '' }   # input closed = cancel
     return $v.Trim()
 }
@@ -490,7 +603,7 @@ function Cmd-Move($arg) {
         $nfiles = @(Get-GuardFiles -Folder $f.path).Count
         Say ""; Say ("  {0}  ·  {1}  ·  {2} files" -f $f.name, $f.path, $nfiles)
         Say ""; Say "  Where to?"
-        $dest = Read-Line "  type a folder path then Enter > "
+        $dest = (Read-Line "  type a folder path then Enter (Tab completes) > " -Paths).Trim('"')
         if (-not $dest) { Say "  cancelled"; return }
         # an existing folder = move inside it, keeping the name
         if (Test-Path -LiteralPath $dest -PathType Container) { $dest = Join-Path $dest (Get-FolderName $f.path) }
@@ -635,7 +748,7 @@ function Cmd-Resume($arg) {
 }
 
 function Cmd-Init($arg) {
-    $path = $arg
+    $path = "$arg".Trim().Trim('"')   # init "C:\My Folder" works like  init C:\My Folder
     if (-not $path) { $path = (Get-Location).Path }
     $path = (Resolve-Path -LiteralPath $path -ErrorAction SilentlyContinue).Path
     if (-not $path) { Say "  not found: $arg" 'Red'; return }
@@ -1138,7 +1251,8 @@ function Cmd-Uninstall {
     $data = Split-Path $script:GuardConfigPath -Parent
     Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue
     Ok "removed" $data
-    Say "  done. bye."
+    Say ""
+    Say "  Guard is successfully uninstalled." 'Green'
     return $false
 }
 

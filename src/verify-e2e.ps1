@@ -374,7 +374,7 @@ $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enq
 Check 'uninstall: anything but YES cancels' (((Out-Of 'uninstall') -match 'cancelled') -and (Test-Path $prefix))
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')
 $o = Out-Of 'uninstall'; Write-Host $o -ForegroundColor DarkGray
-Check 'done. bye.' ($o -match 'done\. bye\.')
+Check 'Guard is successfully uninstalled.' ($o -match 'Guard is successfully uninstalled\.')
 Check 'background guard stopped' (WaitFor { @(Watchers).Count -eq 0 } 15)
 Check 'task removed' ($null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
 Check 'Program Files\guard removed' (WaitFor { -not (Test-Path $prefix) } 10)

@@ -31,6 +31,7 @@ Inside guard:
 - delete <name>  delete something on purpose
 - edit / resume  unlock for a while / lock again
 - help           every command
+- Tab            completes commands, file names and paths
 
 ## Notes
 
