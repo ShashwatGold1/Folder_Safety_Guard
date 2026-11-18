@@ -123,6 +123,7 @@ function Join-CallerConsole([int]$CallerPid) {
 # loading dots: "text." "text.." "text..." from a background thread (same as guard-shell.ps1)
 function Start-GuardDots([string]$Text) {
     try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
+    if ($GuardMargin) { $Text = ' ' + $Text }   # run by  update  inside guard: guard's margin
     $sync = [hashtable]::Synchronized(@{ Stop = $false })
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
@@ -278,6 +279,7 @@ try {
 
 # from here on, guard's own code does the work (PATH, memory, restore)
 . "$Prefix\guard-shell.ps1"
+if (-not $Update) { $script:GuardMargin = $false }   # guard's one-space margin: only inside guard (update)
 $ErrorActionPreference = 'Stop'
 $script:User = $u
 

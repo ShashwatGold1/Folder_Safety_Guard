@@ -143,6 +143,29 @@ function Read-Line([string]$Prompt, [switch]$Paths) {
     if ($null -eq $v) { return '' }   # input closed = cancel
     return $v.Trim()
 }
+# One space of margin on the left of everything guard prints, guard> included. Real console
+# only: there the cursor column says whether a line is starting. Tests and logs get plain text.
+$script:GuardMargin = $false
+try { $script:GuardMargin = -not [Console]::IsOutputRedirected } catch { }
+function Write-Host {
+    param([Parameter(Position = 0, ValueFromRemainingArguments = $true)][object[]]$Object,
+          [switch]$NoNewline, [object]$Separator = ' ', [ConsoleColor]$ForegroundColor, [ConsoleColor]$BackgroundColor)
+    $p = @{}
+    foreach ($k in 'NoNewline', 'ForegroundColor', 'BackgroundColor') { if ($PSBoundParameters.ContainsKey($k)) { $p[$k] = $PSBoundParameters[$k] } }
+    $text = (@($Object) | ForEach-Object { "$_" }) -join [string]$Separator
+    if ($script:GuardMargin) {
+        try {
+            if ([Console]::CursorLeft -eq 0) { $text = ' ' + $text }
+            $text = $text -replace "`n", "`n "
+            # rows padded to the full width (menus) would now wrap: give the space back at the end
+            $max = [Console]::BufferWidth - 1
+            # (only padding is cut: real text on a long line still wraps as before)
+            $text = (($text -split "`n") | ForEach-Object { if ($_.Length -gt $max -and $_.Substring($max).Trim() -eq '') { $_.Substring(0, $max) } else { $_ } }) -join "`n"
+        } catch { }
+    }
+    Microsoft.PowerShell.Utility\Write-Host $text @p
+}
+
 function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $c }
 
 # ---- loading dots: "  locking."  "  locking.."  "  locking..."  while a slow step runs ----
@@ -150,6 +173,7 @@ function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $
 # only: tests and logs (output redirected) never see the dots.
 function Start-GuardDots([string]$Text) {
     try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
+    if ($script:GuardMargin) { $Text = ' ' + $Text }
     $sync = [hashtable]::Synchronized(@{ Stop = $false })
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({

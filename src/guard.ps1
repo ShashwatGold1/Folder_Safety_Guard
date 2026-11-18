@@ -83,7 +83,7 @@ function Show-AdminWarn {
         Write-Host ""
     }
     if ($script:AdminWarn) {
-        Write-Host ("admin     running as administrator  {0}  no prompt needed" -f [char]0x00B7) -ForegroundColor Green
+        Write-Host "Admin Access Already Granted." -ForegroundColor Green
         Write-Host ""
     }
 }

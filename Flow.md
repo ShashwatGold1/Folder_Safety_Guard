@@ -21,7 +21,8 @@ Rules used everywhere below:
 - Memory: every protected folder holds a hidden, locked `_guard.json` with all settings and the list of every protected folder. `C:\ProgramData\guard\config.json` is only a fast copy. If any protected folder survives a reinstall, disk move or backup, everything can be restored from it.
 - guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard runs right there in the same terminal window (no new window). Everything inside runs with no more prompts. `exit` returns to the terminal; the next `guard` asks again.
 - Protected files are owned by SYSTEM, not you. So you, and every program or AI agent running as you, can't delete or unlock them. Only a human clicking Yes on the UAC prompt can. The background guard runs as SYSTEM and locks new files without prompts.
-- Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `admin     running as administrator  ·  no prompt needed`.
+- Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `Admin Access Already Granted.`
+- Everything guard prints starts one space in from the left edge, `guard>` included (left out of the screens below to keep them short). The install on its own has no margin; run by `update` inside guard it has.
 - Plain words only. Never shown: ACL, deny, DE, DC, parent, sweep, watcher.
 - Colours: `LOCKED` `running` `ok` green · `PARTIAL` `UNLOCKED` `STOPPED` `NOT locked` `FAIL` red · `update` and warnings yellow.
 
@@ -787,7 +788,7 @@ Update check failed (offline): no update line, nothing else changes.
 
 Started from a terminal that was already running as administrator (no prompt; green, once, at the top when guard opens, in place of "Admin Access Granted Successfully."):
 ```
-admin     running as administrator  ·  no prompt needed
+Admin Access Already Granted.                                                   ← green
 ```
 
 ---
