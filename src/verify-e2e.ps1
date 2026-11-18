@@ -112,7 +112,7 @@ New-Item -ItemType Directory "$A\pics", "$A\old" -Force | Out-Null
 Section 'install (real: Program Files + SYSTEM task)'
 $o = & "$repo\install.ps1" -Source $src -NoElevate 6>&1 | Out-String
 Write-Host $o -ForegroundColor DarkGray
-Check 'installed successfully' ($o -match 'installed successfully')
+Check 'Guard is Installed Successfully.' ($o -cmatch 'Guard is Installed Successfully\.')
 Check 'all 5 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
 # (not $b: names ignore case, $b would overwrite $B, the Beta folder)
@@ -141,9 +141,9 @@ Check 'status says running' ((Get-WatchState).Text -eq 'running')
 Check 'cloud-only file: init refuses' ((Out-Of "init $A") -match 'only in the cloud')
 $cf.Attributes = 'Normal'; Remove-Item "$A\cloud-only.png" -Force
 $o = Out-Of "init $A"; Write-Host $o -ForegroundColor DarkGray
-Check 'init A: success line' ($o -match 'Alpha folder is successfully protected')
+Check 'init A: success line' ($o -cmatch 'Folder is Protected Successfully\.')
 $o = Out-Of "init $B"
-Check 'init B: success line' ($o -match 'Beta folder is successfully protected')
+Check 'init B: success line' ($o -cmatch 'Folder is Protected Successfully\.')
 Check 'config.json lists 2 folders' (@((Get-Content "$env:ProgramData\guard\config.json" -Raw | ConvertFrom-Json).folders).Count -eq 2)
 Check 'A: owner SYSTEM, file owner SYSTEM' ((OwnerOf $A) -match 'SYSTEM' -and (OwnerOf "$A\amazon-checkout.png") -match 'SYSTEM')
 Check 'A: subfolder locked + owned by SYSTEM' ((IsLocked "$A\sub") -and (OwnerOf "$A\sub") -match 'SYSTEM')
@@ -364,7 +364,7 @@ $seen = WaitFor {
 Check 'yellow update line appears' $seen
 $before = (Watchers | Select-Object -First 1).ProcessId
 $o = Out-Of 'update'; Write-Host $o -ForegroundColor DarkGray
-Check 'updated successfully' ($o -match 'updated successfully')
+Check 'Guard is Updated Successfully.' ($o -cmatch 'Guard is Updated Successfully\.')
 Check 'installed core is 1.1' ((Get-Content "$prefix\guard-core.ps1" -Raw) -match "GuardVersion = '1\.1'")
 Check 'background guard restarted (new process, still one)' (WaitFor { $ws = @(Watchers); $ws.Count -eq 1 -and $ws[0].ProcessId -ne $before } 20)
 Check 'folders untouched by update' ((IsLocked "$A\amazon-checkout.png") -and (IsLocked "$B2\invoice.pdf"))
@@ -379,7 +379,7 @@ $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enq
 Check 'uninstall: anything but YES cancels' (((Out-Of 'uninstall') -match 'cancelled') -and (Test-Path $prefix))
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')
 $o = Out-Of 'uninstall'; Write-Host $o -ForegroundColor DarkGray
-Check 'Guard is successfully uninstalled.' ($o -match 'Guard is successfully uninstalled\.')
+Check 'Guard is Uninstalled Successfully.' ($o -cmatch 'Guard is Uninstalled Successfully\.')
 Check 'background guard stopped' (WaitFor { @(Watchers).Count -eq 0 } 15)
 Check 'task removed' ($null -eq (Get-ScheduledTask -TaskName guard -EA SilentlyContinue))
 Check 'Program Files\guard removed' (WaitFor { -not (Test-Path $prefix) } 10)
@@ -396,11 +396,11 @@ $env:GUARD_ANSWERS = '1'
 # run it the way  irm | iex  does: text, no file behind it (installer must save itself + run apart)
 $o = & ([scriptblock]::Create($sbText)) -Source $src 6>&1 | Out-String
 $env:GUARD_ANSWERS = ''
-Check 'no-file run (iex style) worked' ($o -match 'installed successfully')
+Check 'no-file run (iex style) worked' ($o -cmatch 'Guard is Installed Successfully\.')
 Check 'iex style left nothing behind in this session' (-not (Get-Command Bar-Start -EA SilentlyContinue))
 Write-Host $o -ForegroundColor DarkGray
 Check 'installer found the memory' ($o -match 'memory\s+found in')
-Check 'restore: 2 folders protected' ($o -match '2 folders are successfully protected')
+Check 'restore: 2 folders protected' ($o -cmatch '2 Folders are Protected Successfully\.')
 Check 'restored: locked + SYSTEM again' ((IsLocked "$A\amazon-checkout.png") -and (IsLocked "$B2\invoice.pdf") -and (OwnerOf $A) -match 'SYSTEM')
 Check 'config.json rebuilt with 2 folders' (@((Get-Content "$env:ProgramData\guard\config.json" -Raw | ConvertFrom-Json).folders).Count -eq 2)
 $r = Attack $A 'amazon-checkout.png' 'a3'

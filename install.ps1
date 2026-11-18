@@ -260,8 +260,8 @@ if ($Update) {
 
 Bar-End
 Write-Host ""
-if ($Update) { Write-Host "  updated successfully." -ForegroundColor Green; Write-Host "  type:  " -NoNewline; Write-Host "guard" -ForegroundColor Cyan; Done-Pause; return }
-Write-Host "  installed successfully." -ForegroundColor Green
+if ($Update) { Write-Host "  Guard is Updated Successfully." -ForegroundColor Green; Write-Host "  type:  " -NoNewline; Write-Host "guard" -ForegroundColor Cyan; Done-Pause; return }
+Write-Host "  Guard is Installed Successfully." -ForegroundColor Green
 
 if ($restoreFrom) {
     $script:Cfg = New-GuardConfig

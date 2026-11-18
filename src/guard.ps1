@@ -77,7 +77,7 @@ if (-not $hadMaster -and $script:MemoryFoundIn) {
 function Show-AdminWarn {
     # say once, in green, when guard opens how it got admin rights
     if ($Elevated) {
-        Write-Host "UAC prompt is successful." -ForegroundColor Green
+        Write-Host "Admin Access Granted Successfully." -ForegroundColor Green
         Write-Host ""
     }
     if ($script:AdminWarn) {

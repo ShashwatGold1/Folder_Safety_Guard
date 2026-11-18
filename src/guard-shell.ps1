@@ -632,7 +632,7 @@ function Cmd-Move($arg) {
         Ok "locking" ("folder, folder above ({0}), {1} files" -f (Split-Path (Split-Path $dest -Parent) -Leaf), $r.Locked)
         Save-GuardConfig -Config $script:Cfg -User $script:User
         Ok "memory" "_guard.json updated in all folders  ·  new path saved"
-        Say ""; Say ("  {0} folder is successfully moved and protected" -f $f.name) 'Green'
+        Say ""; Say "  Folder is Moved and Protected Successfully." 'Green'
         Say ("  path        {0}" -f $dest)
         Say  "  note        programs that save here (e.g. the Chrome extension) must be pointed to the new path"
         return
@@ -836,7 +836,7 @@ function Cmd-Init($arg) {
             Say ("    {0}  {1,-34} {2}" -f $g.Count, $g.Name, (($g.Group | ForEach-Object Name) -join ', '))
         }
     }
-    Say ""; Say ("  {0} folder is successfully protected" -f $name) 'Green'
+    Say ""; Say "  Folder is Protected Successfully." 'Green'
     Say ("  path        {0}" -f $path)
     $lk = "  locked      {0} of {1} files" -f $r.Locked, ($files.Count - $r.Skipped)
     if ($hadOthers -gt 0) { $lk += "  ·  switched to this folder" }
@@ -996,7 +996,7 @@ function Invoke-GuardRestore {
     $m = "_guard.json updated in {0}" -f $found.Count
     if ($missing) { $m += ("  ·  {0} missing kept in the list" -f $missing) }
     Ok "memory" $m
-    Say ""; Say ("  {0} folders are successfully protected" -f $found.Count) 'Green'
+    Say ""; if ($found.Count -eq 1) { Say "  Folder is Protected Successfully." 'Green' } else { Say ("  {0} Folders are Protected Successfully." -f $found.Count) 'Green' }
     return $true
 }
 
@@ -1253,7 +1253,7 @@ function Cmd-Uninstall {
     Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue
     Ok "removed" $data
     Say ""
-    Say "  Guard is successfully uninstalled." 'Green'
+    Say "  Guard is Uninstalled Successfully." 'Green'
     return $false
 }
 

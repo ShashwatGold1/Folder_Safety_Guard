@@ -67,7 +67,7 @@ guard  installing   [==============================]  100%   8/8
   ok    guard      background guard running
   ok    memory     nothing from an earlier install
 
-  installed successfully.                                                        ← green
+  Guard is Installed Successfully.                                               ← green
   type:  guard                                                                   ← guard in cyan
 ```
 
@@ -146,7 +146,7 @@ guard runs as administrator. click Yes on the prompt.
 UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
-UAC prompt is successful.                                                       ← green
+Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------
 
@@ -213,7 +213,7 @@ guard> init C:\Users\ojhas\Downloads\_Screenshots
     1  cloud file, not available locally    report.pdf
     1  open in another program              notes.docx
 
-  _Screenshots folder is successfully protected                                  ← green
+  Folder is Protected Successfully.                                              ← green
   path        C:\Users\ojhas\Downloads\_Screenshots
   locked      47 of 47 files
 
@@ -248,7 +248,7 @@ guard runs as administrator. click Yes on the prompt.
 UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
-UAC prompt is successful.                                                       ← green
+Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------
 
@@ -494,7 +494,7 @@ guard> move folder
   locking   folder, folder above (Keep), 47 files                                ok
   memory    _guard.json updated in all folders  ·  new path saved                ok
 
-  _Screenshots folder is successfully moved and protected                        ← green
+  Folder is Moved and Protected Successfully.                                    ← green
   path        D:\Keep\_Screenshots
   note        programs that save here (e.g. the Chrome extension) must be pointed to the new path
   ...status (new path)...
@@ -558,7 +558,7 @@ guard> init
   memory    _guard.json written and locked  ·  updated in 1 other folder         ok
   guard     told about the new folder                                            ok
 
-  Tax folder is successfully protected                                           ← green
+  Folder is Protected Successfully.                                              ← green
   path        C:\Users\ojhas\Documents\Tax
   locked      12 of 12 files  ·  switched to this folder
 
@@ -778,7 +778,7 @@ Chrome is saving right now:
 
 Update check failed (offline): no update line, nothing else changes.
 
-Started from a terminal that was already running as administrator (no prompt; green, once, at the top when guard opens, in place of "UAC prompt is successful."):
+Started from a terminal that was already running as administrator (no prompt; green, once, at the top when guard opens, in place of "Admin Access Granted Successfully."):
 ```
 admin     running as administrator  ·  no prompt needed
 ```
@@ -801,7 +801,7 @@ guard  updating 1.0 → 1.1   [==============================]  100%   8/8
   ok    guard      background guard restarted
   ok    folders    2 protected folders untouched · 59 files still locked
 
-  updated successfully.                                                          ← green
+  Guard is Updated Successfully.                                                 ← green
   type:  guard                                                                   ← guard in cyan
 PS>
 ```
@@ -833,7 +833,7 @@ guard> uninstall
   removed   C:\Program Files\guard                                               ok
   removed   C:\ProgramData\guard                                                 ok
 
-  Guard is successfully uninstalled.                                             ← green
+  Guard is Uninstalled Successfully.                                             ← green
 PS>
 ```
 
@@ -922,7 +922,7 @@ guard  installing   [==============================]  100%   8/8
   ok    guard      background guard running
   ok    memory     found in C:\Users\ojhas\Downloads\_Screenshots  ·  lists 4 folders
 
-  installed successfully.                                                        ← green
+  Guard is Installed Successfully.                                               ← green
 
   guard memory found. it lists 4 protected folders:
     1  C:\Users\ojhas\Downloads\_Screenshots    found      47 files
@@ -940,7 +940,7 @@ guard  installing   [==============================]  100%   8/8
   locking   folders, folders above, 59 files                                     ok
   memory    _guard.json updated in both  ·  2 missing folders kept in the list  ok
 
-  2 folders are successfully protected                                           ← green
+  2 Folders are Protected Successfully.                                          ← green
   type:  guard                                                                   ← guard in cyan
 ```
 
