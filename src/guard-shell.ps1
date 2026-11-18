@@ -40,7 +40,13 @@ function Get-GuardCompletions([string]$line, [switch]$Paths) {
     $words = @()
     switch ($cmd) {
         'init'   { return @{ Base = $base; Items = @(Get-PathCompletions $arg -Dirs) } }
-        'help'   { $words = @('all') + $script:GuardCommands }
+        'help'   {
+            # the start table: headings, rows and explanations; the row puts its topic in the line
+            $rows = @($script:TableRows | Where-Object { $_[1].StartsWith($arg, [StringComparison]::OrdinalIgnoreCase) })
+            return @{ Base = $base; Items = @($rows | ForEach-Object { $_[1] })
+                      Labels = @($rows | ForEach-Object { '{0,-26}{1}' -f $_[2], $_[3] })
+                      Groups = @($rows | ForEach-Object { $_[0] }) }
+        }
         'use'    { $words = @(1..([Math]::Max(1, @($script:Cfg.folders).Count)) | ForEach-Object { "$_" }) }
         'skip'   { $words = @('all', 'remove') }
         { $_ -in 'edit','resume','remove' } { $words = @('all') }
@@ -79,7 +85,7 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
     $maxRows = 8
     $refresh = {   # dot-sourced: the list again, for the word now before the cursor
         $c = Get-GuardCompletions $buf.Substring(0, $pos) -Paths:$Paths
-        if (@($c.Items).Count -eq 0) { $menu = $null } else { $menu = @{ Base = $c.Base; Items = @($c.Items); Sel = 0 } }
+        if (@($c.Items).Count -eq 0) { $menu = $null } else { $menu = @{ Base = $c.Base; Items = @($c.Items); Labels = $c.Labels; Groups = $c.Groups; Sel = 0 } }
     }
     $take = {      # dot-sourced: put the marked choice in the line, close the list
         $head = $menu.Base + $menu.Items[$menu.Sel]
@@ -97,15 +103,32 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
         $shown = $buf.Length
         $rows = @()
         if ($menu) {
-            $n = $menu.Items.Count; $vis = [Math]::Min($maxRows, $n)
-            $first = [Math]::Max(0, [Math]::Min($menu.Sel - [Math]::Floor($vis / 2), $n - $vis))
+            $n = $menu.Items.Count
             # each choice starts right under the word being completed, the > two columns before it
             $at0 = ($left + $menu.Base.Length) % $w
             if ($at0 -lt 2 -or $at0 -gt $w - 12) { $at0 = 2 + $m.Length }
-            for ($i = $first; $i -lt $first + $vis; $i++) {
-                $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green' }
-                $rows += ,@(((' ' * ($at0 - 2)) + $mark + $menu.Items[$i]), $col)
+            $pre = ' ' * ($at0 - 2)
+            # every row: text, colour, choice number (-1 = a heading or a blank line)
+            $disp = New-Object System.Collections.ArrayList
+            $last = $null; $selRow = 0
+            for ($i = 0; $i -lt $n; $i++) {
+                if ($menu.Groups) {
+                    # help: the start table's headings, a blank line between sections
+                    $g = $menu.Groups[$i]
+                    if ($g -ne $last) {
+                        if ($null -ne $last) { [void]$disp.Add(@('', 'Gray', -1)) }
+                        [void]$disp.Add(@(($pre + '  ' + $script:TableHeads[$g]), 'Gray', -1)); $last = $g
+                        [void]$disp.Add(@('', 'Gray', -1))
+                    }
+                }
+                $label = $menu.Items[$i]; if ($menu.Labels) { $label = $menu.Labels[$i] }
+                $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green'; $selRow = $disp.Count }
+                [void]$disp.Add(@(($pre + $mark + $label), $col, $i))
             }
+            $limit = $maxRows; if ($menu.Groups) { try { $limit = [Math]::Max($maxRows, [Console]::WindowHeight - 4) } catch { } }
+            $vis = [Math]::Min($limit, $disp.Count)
+            $first = [Math]::Max(0, [Math]::Min($selRow - [Math]::Floor($vis / 2), $disp.Count - $vis))
+            for ($r = $first; $r -lt $first + $vis; $r++) { $rows += ,@($disp[$r][0], $disp[$r][1]) }
         }
         $below = $top + [Math]::Floor([Math]::Max(0, $left + [Math]::Max($buf.Length, 1) - 1) / $w) + 1
         $need = [Math]::Max($rows.Count, $listShown)
@@ -175,7 +198,7 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
                     if ($common.Length -gt ($pos - $c.Base.Length)) {
                         $head = $c.Base + $common; $buf = $head + $buf.Substring($pos); $pos = $head.Length
                     }
-                    $menu = @{ Base = $c.Base; Items = $items; Sel = 0 }
+                    $menu = @{ Base = $c.Base; Items = $items; Labels = $c.Labels; Groups = $c.Groups; Sel = 0 }
                 }
             }
             'Backspace' { if ($pos -gt 0) { $buf = $buf.Remove($pos - 1, 1); $pos-- } }
@@ -1201,6 +1224,42 @@ function Invoke-GuardRestore {
 }
 
 # ---- help -----------------------------------------------------------------
+# The start table as data, for the help list under  guard> help  + Tab: heading, row as the
+# table shows it, and the  help  topic that row opens.
+$script:TableHeads = @{
+    'guard'   = '-------------------- Guard ---------------------'
+    'all'     = '------------ All protected folders -------------'
+    'current' = '---------------- Current folder ----------------'
+}
+$script:TableRows = @(
+    @('guard', 'folders', 'folders', 'show all protected folders'),
+    @('guard', 'use', 'use <n>', 'switch to folder n'),
+    @('guard', 'init', 'init', 'protect the folder the terminal is in'),
+    @('guard', 'init', 'init <path>', 'protect the folder at path'),
+    @('guard', 'update', 'update', 'install the newest guard'),
+    @('guard', 'cls', 'cls', 'clear screen'),
+    @('guard', 'help', 'help <command>', 'explain a command'),
+    @('guard', 'all', 'help all', 'explain every command'),
+    @('guard', 'uninstall', 'uninstall', 'remove guard'),
+    @('guard', 'exit', 'exit', 'close guard'),
+    @('all', 'edit', 'edit all', 'unlock every folder'),
+    @('all', 'resume', 'resume all', 'lock every folder'),
+    @('all', 'remove', 'remove all', 'stop protecting every folder'),
+    @('all', 'skip', 'skip all <pattern>', 'add files that are never locked, in every folder'),
+    @('current', 'list', 'list', 'show files and folders'),
+    @('current', 'delete', 'delete <name>', 'delete files or folders'),
+    @('current', 'delete', 'delete all', 'delete everything in the folder'),
+    @('current', 'move', 'move <name>', 'copy or cut files or folders'),
+    @('current', 'move', 'move all', 'copy or cut everything in the folder'),
+    @('current', 'move', 'move folder', 'move the protected folder somewhere else'),
+    @('current', 'edit', 'edit', 'unlock the folder'),
+    @('current', 'resume', 'resume', 'lock the folder'),
+    @('current', 'remove', 'remove', 'stop protecting the folder'),
+    @('current', 'skip', 'skip', 'show files that are never locked'),
+    @('current', 'skip', 'skip <pattern>', 'add files that are never locked'),
+    @('current', 'skip', 'skip remove <pattern>', 'take a pattern out')
+)
+
 $script:HelpShort = [ordered]@{
     'folders'='list protected folders with their numbers · * marks the current one'
     'use'='make folder number n the current one · numbers come from folders'

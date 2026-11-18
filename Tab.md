@@ -64,26 +64,73 @@ Enter:
 
 ---
 
-## 4. Typing narrows the list
+## 4. help: the start table, and typing narrows it
+
+After `help`, the list is the same table guard shows when it starts: its headings, every row, and the explanations. The row you pick puts its command in the line.
 
 ```
  guard> help                                        ← help + space + Tab
-           > all
-             list
-             delete
-             move
-             edit
-             resume
-             init
-             remove                                 ← 8 rows at a time, scrolls as the mark moves
+             -------------------- Guard ---------------------
+
+           > folders                   show all protected folders
+             use <n>                   switch to folder n
+             init                      protect the folder the terminal is in
+             init <path>               protect the folder at path
+             update                    install the newest guard
+             cls                       clear screen
+             help <command>            explain a command
+             help all                  explain every command
+             uninstall                 remove guard
+             exit                      close guard
+
+             ------------ All protected folders -------------
+
+             edit all                  unlock every folder
+             resume all                lock every folder
+             remove all                stop protecting every folder
+             skip all <pattern>        add files that are never locked, in every folder
+
+             ---------------- Current folder ----------------
+
+             list                      show files and folders
+             delete <name>             delete files or folders
+             delete all                delete everything in the folder
+             move <name>               copy or cut files or folders
+             move all                  copy or cut everything in the folder
+             move folder               move the protected folder somewhere else
+             edit                      unlock the folder
+             resume                    lock the folder
+             remove                    stop protecting the folder
+             skip                      show files that are never locked
+             skip <pattern>            add files that are never locked
+             skip remove <pattern>     take a pattern out
 ```
 
-Type `li`:
+Type `r`: only the matching rows stay, under their headings:
+
+```
+ guard> help r
+             ------------ All protected folders -------------
+
+           > resume all                lock every folder
+             remove all                stop protecting every folder
+
+             ---------------- Current folder ----------------
+
+             resume                    lock the folder
+             remove                    stop protecting the folder
+```
+
+Type `li` instead, only one row is left:
 
 ```
  guard> help li
-           > list                                   ← only one left
+             ---------------- Current folder ----------------
+
+           > list                      show files and folders
 ```
+
+A list taller than the window scrolls as the mark moves. Other lists show 8 rows at a time.
 
 Enter, Enter:
 

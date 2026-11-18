@@ -67,6 +67,10 @@ function Tab([string]$l, [switch]$Paths) { $c = Get-GuardCompletions $l -Paths:$
 Check "Tab: command name"            (((Tab 'ini') -join '|') -eq 'init')
 Check "Tab: several commands cycle"  (((Tab 'e') -join '|') -eq 'edit|exit')
 Check "Tab: help <command>"          ((Tab 'help li') -contains 'help list')
+$hc = Get-GuardCompletions 'help '
+Check "Tab: help = the start table, every row, in order" (($hc.Items.Count -eq $script:TableRows.Count) -and ($hc.Groups[0] -eq 'guard') -and ($hc.Groups[-1] -eq 'current') -and ($hc.Labels[1] -match '^use <n>\s+switch to folder n$'))
+$hc = Get-GuardCompletions 'help re'
+Check "Tab: help re = resume / remove rows, both sections" ((($hc.Items | Sort-Object -Unique) -join '|') -eq 'remove|resume' -and ($hc.Groups -contains 'all') -and ($hc.Groups -contains 'current'))
 Check "Tab: edit all"                (((Tab 'edit a') -join '|') -eq 'edit all')
 Check "Tab: init path, folders only" (((Tab "init $root\sh") -join '|') -eq "init $root\shots")
 Push-Location $root
