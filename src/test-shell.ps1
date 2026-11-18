@@ -77,6 +77,7 @@ Check "Tab: a folder path question"  (((Tab "$root\do" -Paths) -join '|') -eq "$
 Check "Tab: delete <file name>"      ((Tab 'delete gum') -contains 'delete gumroad-settings.png')
 Check "Tab: move folder"             ((Tab 'move fo') -contains 'move folder')
 Check "Tab: nothing to complete"     (@(Tab 'zzz').Count -eq 0)
+Check "Tab: several = filled in as far as they agree" (((Get-CommonStart @('resume','remove')) -eq 're') -and ((Get-CommonStart @('edit','exit')) -eq 'e') -and ((Get-CommonStart @('Docs','docs-old')) -eq 'Docs'))
 
 Write-Host "`n== look ==" -ForegroundColor Cyan
 Check "sizes in KB / MB" (((Format-Size 1258291) -eq '1.2 MB') -and ((Format-Size 2048) -eq '2.0 KB') -and ((Format-Size 12) -eq '12 B'))

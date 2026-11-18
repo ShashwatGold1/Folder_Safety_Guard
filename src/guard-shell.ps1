@@ -56,32 +56,107 @@ function Get-GuardCompletions([string]$line, [switch]$Paths) {
     return @{ Base = $base; Items = @($words | Where-Object { $_.StartsWith($arg, [StringComparison]::OrdinalIgnoreCase) }) }
 }
 
+function Get-CommonStart([string[]]$Words) {
+    # the longest start all words share, ignoring case ("edit","exit" -> "e")
+    $s = $Words[0]
+    foreach ($x in $Words) { while ($s -and -not $x.StartsWith($s, [StringComparison]::OrdinalIgnoreCase)) { $s = $s.Substring(0, $s.Length - 1) } }
+    return $s
+}
+
 function Read-GuardInput([string]$Prompt, [switch]$Paths) {
-    # one line from the keyboard, with Tab completion (cmd style: Tab again = next choice,
-    # Shift+Tab = back), Up/Down = earlier lines, Esc = clear. Plain ReadLine when piped.
+    # One line from the keyboard. Tab: one match = filled in; several = filled in as far as they
+    # agree, and a list opens under the line: Up/Down (or Tab/Shift+Tab) move, Enter takes the
+    # marked one, typing more narrows the list, Esc closes it. No list: Up/Down = earlier lines,
+    # Esc = clear the line. Plain ReadLine when piped.
     Write-Host -NoNewline $Prompt
     $piped = $true; try { $piped = [Console]::IsInputRedirected } catch { }
     if ($piped) { return [Console]::ReadLine() }
-    $buf = ''; $pos = 0; $shown = 0
+    $buf = ''; $pos = 0; $shown = 0; $listShown = 0
     $top = [Console]::CursorTop; $left = [Console]::CursorLeft
     $hist = $script:History.Count; $saved = ''
-    $tabs = $null; $ti = -1; $tail = ''
-    $draw = {   # dot-sourced: updates $top / $shown right here
+    $menu = $null      # @{ Base = text before the word; Items = choices; Sel = marked one }
+    $m = ''; if ($script:GuardMargin) { $m = ' ' }
+    $maxRows = 8
+    $refresh = {   # dot-sourced: the list again, for the word now before the cursor
+        $c = Get-GuardCompletions $buf.Substring(0, $pos) -Paths:$Paths
+        if (@($c.Items).Count -eq 0) { $menu = $null } else { $menu = @{ Base = $c.Base; Items = @($c.Items); Sel = 0 } }
+    }
+    $take = {      # dot-sourced: put the marked choice in the line, close the list
+        $head = $menu.Base + $menu.Items[$menu.Sel]
+        $buf = $head + $buf.Substring($pos); $pos = $head.Length; $menu = $null
+    }
+    $draw = {      # dot-sourced: the line, then the list under it; updates $top / $shown / $listShown
         $w = [Console]::BufferWidth
         [Console]::SetCursorPosition($left, $top)
         $pad = [Math]::Max(0, $shown - $buf.Length)
-        [Console]::Write($buf + (' ' * $pad))
+        Microsoft.PowerShell.Utility\Write-Host -NoNewline ($buf + (' ' * $pad))   # (names with é, ü... show right)
         # writing past the bottom scrolls the window: the line start moved up with it
         $end = $left + $buf.Length + $pad
         $want = $top + [Math]::Floor([Math]::Max(0, $end - 1) / $w)
         if ($end -gt 0 -and [Console]::CursorTop -lt $want) { $top -= ($want - [Console]::CursorTop) }
+        $shown = $buf.Length
+        $rows = @()
+        if ($menu) {
+            $n = $menu.Items.Count; $vis = [Math]::Min($maxRows, $n)
+            $first = [Math]::Max(0, [Math]::Min($menu.Sel - [Math]::Floor($vis / 2), $n - $vis))
+            for ($i = $first; $i -lt $first + $vis; $i++) {
+                $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green' }
+                $rows += ,@(("{0}  {1}{2}" -f $m, $mark, $menu.Items[$i]), $col)
+            }
+            $more = ''; if ($n -gt $vis) { $more = "  ·  {0} of {1}" -f ($menu.Sel + 1), $n }
+            $rows += ,@(("{0}    ↑ ↓ pick  ·  Enter use  ·  type to narrow  ·  Esc close{1}" -f $m, $more), 'DarkGray')
+        }
+        $below = $top + [Math]::Floor([Math]::Max(0, $left + [Math]::Max($buf.Length, 1) - 1) / $w) + 1
+        $need = [Math]::Max($rows.Count, $listShown)
+        if ($need -gt 0) {
+            # room under the line first: at the bottom of the window, scroll up (the line moves too)
+            $over = $below + $need - [Console]::BufferHeight
+            if ($over -gt 0) { [Console]::SetCursorPosition(0, [Console]::BufferHeight - 1); [Console]::Write("`n" * $over); $top -= $over; $below -= $over }
+            for ($r = 0; $r -lt $need; $r++) {
+                [Console]::SetCursorPosition(0, $below + $r)
+                $t = ''; $col = 'Gray'; if ($r -lt $rows.Count) { $t = $rows[$r][0]; $col = $rows[$r][1] }
+                if ($t.Length -gt $w - 1) { $t = $t.Substring(0, $w - 1) }
+                # the host's own writer (not [Console]::Write): ↑ ↓ show as arrows, not as ?
+                Microsoft.PowerShell.Utility\Write-Host -NoNewline $t.PadRight($w - 1) -ForegroundColor $col
+            }
+        }
+        $listShown = $rows.Count
         $at = $left + $pos
         [Console]::SetCursorPosition($at % $w, $top + [Math]::Floor($at / $w))
-        $shown = $buf.Length
     }
     while ($true) {
         $k = [Console]::ReadKey($true)
-        if ($k.Key -ne 'Tab') { $tabs = $null }
+        $shift = [bool]($k.Modifiers -band [ConsoleModifiers]::Shift)
+        if ($menu) {
+            # the list is open
+            $n = $menu.Items.Count
+            switch ($k.Key) {
+                'UpArrow'   { $menu.Sel = ($menu.Sel - 1 + $n) % $n }
+                'DownArrow' { $menu.Sel = ($menu.Sel + 1) % $n }
+                'Tab'       { if ($shift) { $menu.Sel = ($menu.Sel - 1 + $n) % $n } else { $menu.Sel = ($menu.Sel + 1) % $n } }
+                'Enter'     { . $take }
+                'Escape'    { $menu = $null }
+                'Backspace' { if ($pos -gt 0) { $buf = $buf.Remove($pos - 1, 1); $pos--; . $refresh } else { $menu = $null } }
+                default     {
+                    $ch = $k.KeyChar
+                    if ($ch -eq ' ') { $buf = $buf.Insert($pos, ' '); $pos++; $menu = $null }
+                    elseif ($ch -and -not [char]::IsControl($ch)) { $buf = $buf.Insert($pos, [string]$ch); $pos++; . $refresh }
+                    else {
+                        # Left, Right, Home, End, Delete: close the list, then do it
+                        $menu = $null
+                        switch ($k.Key) {
+                            'LeftArrow'  { if ($pos -gt 0) { $pos-- } }
+                            'RightArrow' { if ($pos -lt $buf.Length) { $pos++ } }
+                            'Home'       { $pos = 0 }
+                            'End'        { $pos = $buf.Length }
+                            'Delete'     { if ($pos -lt $buf.Length) { $buf = $buf.Remove($pos, 1) } }
+                        }
+                    }
+                }
+            }
+            . $draw
+            continue
+        }
         switch ($k.Key) {
             'Enter'     {
                 $pos = $buf.Length; . $draw; [Console]::WriteLine()
@@ -89,15 +164,17 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
                 return $buf
             }
             'Tab'       {
-                if ($null -eq $tabs) {
-                    $c = Get-GuardCompletions $buf.Substring(0, $pos) -Paths:$Paths
-                    if (@($c.Items).Count) { $tabs = @{ Base = $c.Base; Items = @($c.Items) }; $tail = $buf.Substring($pos); $ti = -1 }
-                }
-                if ($tabs) {
-                    $n = $tabs.Items.Count
-                    if ($k.Modifiers -band [ConsoleModifiers]::Shift) { $ti = ($ti - 1 + $n) % $n } else { $ti = ($ti + 1) % $n }
-                    $head = $tabs.Base + $tabs.Items[$ti]
-                    $buf = $head + $tail; $pos = $head.Length
+                $c = Get-GuardCompletions $buf.Substring(0, $pos) -Paths:$Paths
+                $items = @($c.Items)
+                if ($items.Count -eq 1) {
+                    $head = $c.Base + $items[0]; $buf = $head + $buf.Substring($pos); $pos = $head.Length
+                } elseif ($items.Count -gt 1) {
+                    # fill in as far as all choices agree, then show them
+                    $common = Get-CommonStart $items
+                    if ($common.Length -gt ($pos - $c.Base.Length)) {
+                        $head = $c.Base + $common; $buf = $head + $buf.Substring($pos); $pos = $head.Length
+                    }
+                    $menu = @{ Base = $c.Base; Items = $items; Sel = 0 }
                 }
             }
             'Backspace' { if ($pos -gt 0) { $buf = $buf.Remove($pos - 1, 1); $pos-- } }
