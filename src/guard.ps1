@@ -5,7 +5,8 @@
 #               as a different (admin) account, and the locks must be for the real user
 #   -AttachTo   the elevated copy, started hidden: moves into this terminal (the caller's pid)
 #   -OwnWindow  fallback when it couldn't: guard runs in a window of its own
-param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow)
+#   -Caller     the waiting window's pid: told when the green line is about to print
+param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow, [int]$Caller = 0)
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
@@ -42,17 +43,17 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
     Write-Host ""
-    Write-Host "Requesting Admin Access..."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until guard exits
-    try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $psi; $p.WaitForExit() }
-    catch { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red; Write-Host "" }
+    $p = Request-GuardAdmin 'Requesting Admin Access' $psi
+    if ($p) { $p.WaitForExit() }
+    else { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red; Write-Host "" }
     try { [Console]::OutputEncoding = $enc } catch { }
     return
 }
 if ($AttachTo) {
     $c = $Cwd; if ($c.EndsWith('\')) { $c += '.' }
-    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Cwd `"$c`" -ForUser `"$ForUser`""
+    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Caller $AttachTo -Cwd `"$c`" -ForUser `"$ForUser`""
     if (Join-CallerConsole $AttachTo) {
         $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $psi
         $si.UseShellExecute = $false        # inherits the caller's window
@@ -77,6 +78,7 @@ if (-not $hadMaster -and $script:MemoryFoundIn) {
 function Show-AdminWarn {
     # say once, in green, when guard opens how it got admin rights
     if ($Elevated) {
+        Wait-GuardCallerDots $Caller
         Write-Host "Admin Access Granted Successfully." -ForegroundColor Green
         Write-Host ""
     }

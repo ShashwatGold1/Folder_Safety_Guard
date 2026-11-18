@@ -14,7 +14,8 @@ param(
     [string]$To = '',               # new version, for the update header
     [switch]$Pause,                 # keep a window of its own open at the end
     [int]$AttachTo = 0,             # the elevated copy, started hidden: moves into the caller's window
-    [switch]$Granted                # set after the UAC click: say so before the progress bar
+    [switch]$Granted,               # set after the UAC click: say so before the progress bar
+    [int]$Caller = 0                # the waiting window's pid: told when that line is about to print
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -118,8 +119,70 @@ function Join-CallerConsole([int]$CallerPid) {
         return $true
     } catch { return $false }
 }
+
+# loading dots: "text." "text.." "text..." from a background thread (same as guard-shell.ps1)
+function Start-GuardDots([string]$Text) {
+    try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
+    $sync = [hashtable]::Synchronized(@{ Stop = $false })
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($t, $s)
+        $n = 0
+        while (-not $s.Stop) {
+            $n = $n % 3 + 1
+            [Console]::Write("`r" + $t + ('.' * $n) + (' ' * (3 - $n)) + "`r" + $t + ('.' * $n))
+            for ($i = 0; $i -lt 4 -and -not $s.Stop; $i++) { Start-Sleep -Milliseconds 100 }
+        }
+    }).AddArgument($Text).AddArgument($sync)
+    return @{ PS = $ps; Sync = $sync; Run = $ps.BeginInvoke(); Text = $Text }
+}
+function Stop-GuardDots($h, [switch]$Keep) {
+    if (-not $h) { return }
+    $h.Sync.Stop = $true
+    try { [void]$h.PS.EndInvoke($h.Run) } catch { }
+    $h.PS.Dispose()
+    if ($Keep) { [Console]::WriteLine("`r" + $h.Text + '...') }
+    else { [Console]::Write("`r" + (' ' * ($h.Text.Length + 3)) + "`r") }
+}
+function Request-GuardAdmin([string]$Text, [string]$ArgList) {
+    # the UAC prompt with moving dots until the admin copy is about to print here; $null = No
+    $ready = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-ready-$PID")
+    $shown = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-shown-$PID")
+    $dots = Start-GuardDots $Text
+    if (-not $dots) { Write-Host ($Text + '...') }
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({ param($a) try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList)
+    $run = $ps.BeginInvoke()
+    $p = $null; $t0 = $null
+    try {
+        while ($true) {
+            if ($null -eq $t0 -and $run.IsCompleted) {
+                $p = @($ps.EndInvoke($run)) | Select-Object -First 1
+                if (-not $p) { break }
+                $t0 = Get-Date
+            }
+            if ($ready.WaitOne(100)) { break }
+            if ($p -and ($p.HasExited -or ((Get-Date) - $t0).TotalSeconds -gt 20)) { break }
+        }
+    } finally {
+        Stop-GuardDots $dots -Keep
+        [void]$shown.Set()
+        $ps.Dispose()
+    }
+    return $p
+}
+function Wait-GuardCallerDots([int]$CallerPid) {
+    # admin copy: let the waiting window end its "Requesting Admin Access..." line first
+    if (-not $CallerPid) { return }
+    try {
+        $shown = [Threading.EventWaitHandle]::OpenExisting("Local\guard-shown-$CallerPid")
+        $ready = [Threading.EventWaitHandle]::OpenExisting("Local\guard-ready-$CallerPid")
+        [void]$ready.Set(); [void]$shown.WaitOne(3000)
+    } catch { }
+}
+
 if ($AttachTo) {
-    $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Granted -ForUser `"$who`" -Prefix `"$Prefix`""
+    $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Granted -Caller $AttachTo -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $fwd += " -Source `"$Source`"" }
     if (Join-CallerConsole $AttachTo) {
         $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $fwd
@@ -147,11 +210,11 @@ if (-not (Is-Admin) -and -not $NoElevate) {
     $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -AttachTo $PID -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $a += " -Source `"$Source`"" }
     Write-Host ""
-    Write-Host "Requesting Admin Access..."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until the install is done
-    try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a; $p.WaitForExit() }
-    catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
+    $p = Request-GuardAdmin 'Requesting Admin Access' $a
+    if (-not $p) { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
+    $p.WaitForExit()
     try { [Console]::OutputEncoding = $enc } catch { }
     return
 }
@@ -162,7 +225,7 @@ if ($Update) {
     $script:BarWhat = "updating $f $arrow $t2"
 }
 # right under "Requesting Admin Access..." in the same window; Bar-Start adds the blank line after
-if ($Granted) { Write-Host "Admin Access Granted Successfully." -ForegroundColor Green }
+if ($Granted) { Wait-GuardCallerDots $Caller; Write-Host "Admin Access Granted Successfully." -ForegroundColor Green }
 Bar-Start
 
 # 1 check
@@ -192,7 +255,8 @@ try {
     foreach ($p in $old) { try { Stop-Process -Id $p.ProcessId -Force -EA Stop } catch { } }
     $bom = New-Object Text.UTF8Encoding($true)
     $changed = 0
-    foreach ($fn in $runtime) {
+    $dl = Start-GuardDots '  ..    files      downloading'
+    try { foreach ($fn in $runtime) {
         # (-Source reads the raw bytes so a BOM arrives exactly as in a download: tests hit the same path)
         if ($Source) { $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $Source $fn))) }
         else { $text = (Invoke-WebRequest "$repo/src/$fn" -UseBasicParsing).Content }
@@ -203,7 +267,7 @@ try {
         $before = $null; if (Test-Path $dest) { $before = Get-Content -LiteralPath $dest -Raw -Encoding UTF8 }
         if ($before -ne $text) { $changed++ }
         [IO.File]::WriteAllText($dest, $text, $bom)     # BOM: PowerShell 5.1 reads it as UTF-8
-    }
+    } } finally { Stop-GuardDots $dl }   # wiped: the ok row prints on the same line
     $cmd = "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$Prefix\guard.ps1`" %*`r`n"
     $cmdPath = Join-Path $Prefix 'guard.cmd'
     $cmdSame = (Test-Path $cmdPath) -and ((Get-Content $cmdPath -Raw) -eq $cmd)

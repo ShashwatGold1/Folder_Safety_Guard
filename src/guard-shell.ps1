@@ -144,6 +144,81 @@ function Read-Line([string]$Prompt, [switch]$Paths) {
     return $v.Trim()
 }
 function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $c }
+
+# ---- loading dots: "  locking."  "  locking.."  "  locking..."  while a slow step runs ----
+# A background thread redraws the line; the step itself prints nothing meanwhile. Real console
+# only: tests and logs (output redirected) never see the dots.
+function Start-GuardDots([string]$Text) {
+    try { if ([Console]::IsOutputRedirected) { return $null } } catch { return $null }
+    $sync = [hashtable]::Synchronized(@{ Stop = $false })
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($t, $s)
+        $n = 0
+        while (-not $s.Stop) {
+            $n = $n % 3 + 1
+            # 3 dots back to 1: spaces wipe the old ones, then the cursor goes back after the dots
+            [Console]::Write("`r" + $t + ('.' * $n) + (' ' * (3 - $n)) + "`r" + $t + ('.' * $n))
+            for ($i = 0; $i -lt 4 -and -not $s.Stop; $i++) { Start-Sleep -Milliseconds 100 }
+        }
+    }).AddArgument($Text).AddArgument($sync)
+    return @{ PS = $ps; Sync = $sync; Run = $ps.BeginInvoke(); Text = $Text }
+}
+function Stop-GuardDots($h, [switch]$Keep) {
+    # -Keep: leave "text..." and go to the next line. Otherwise wipe the line for what comes next.
+    if (-not $h) { return }
+    $h.Sync.Stop = $true
+    try { [void]$h.PS.EndInvoke($h.Run) } catch { }
+    $h.PS.Dispose()
+    if ($Keep) { [Console]::WriteLine("`r" + $h.Text + '...') }
+    else { [Console]::Write("`r" + (' ' * ($h.Text.Length + 3)) + "`r") }
+}
+function Invoke-WithDots([string]$DotsText, [scriptblock]$DotsDo) {
+    # (odd names: the block runs in here and sees these, so they must not hide the caller's)
+    $dotsHandle = Start-GuardDots $DotsText
+    try { & $DotsDo } finally { Stop-GuardDots $dotsHandle }
+}
+
+function Request-GuardAdmin([string]$Text, [string]$ArgList) {
+    # The UAC prompt, with "Text." "Text.." "Text..." until the admin copy is about to print in
+    # this window (it says so through two named events). Returns the process, $null = cancelled.
+    $ready = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-ready-$PID")
+    $shown = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, "Local\guard-shown-$PID")
+    $dots = Start-GuardDots $Text
+    if (-not $dots) { Write-Host ($Text + '...') }
+    # the prompt blocks whoever opens it: open it on another thread so the dots keep moving
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({ param($a) try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList)
+    $run = $ps.BeginInvoke()
+    $p = $null; $t0 = $null
+    try {
+        while ($true) {
+            if ($null -eq $t0 -and $run.IsCompleted) {
+                $p = @($ps.EndInvoke($run)) | Select-Object -First 1
+                if (-not $p) { break }          # No on the prompt
+                $t0 = Get-Date
+            }
+            if ($ready.WaitOne(100)) { break }
+            # an admin copy that never signals (it opened its own window, or failed): stop waiting
+            if ($p -and ($p.HasExited -or ((Get-Date) - $t0).TotalSeconds -gt 20)) { break }
+        }
+    } finally {
+        Stop-GuardDots $dots -Keep
+        [void]$shown.Set()          # the line is done: the admin copy may print now
+        $ps.Dispose()
+    }
+    return $p
+}
+
+function Wait-GuardCallerDots([int]$CallerPid) {
+    # admin copy: the waiting window is drawing "Requesting Admin Access..." - let it end the line
+    if (-not $CallerPid) { return }
+    try {
+        $shown = [Threading.EventWaitHandle]::OpenExisting("Local\guard-shown-$CallerPid")
+        $ready = [Threading.EventWaitHandle]::OpenExisting("Local\guard-ready-$CallerPid")
+        [void]$ready.Set(); [void]$shown.WaitOne(3000)
+    } catch { }
+}
 # result rows, as in Flow.md: label, what, (optional) plain-words meaning, ok at column 81
 function Ok([string]$label, [string]$detail, [string]$meaning = '') {
     $body = "{0,-9} {1}" -f $label, $detail
@@ -364,10 +439,12 @@ function Wait-WatchSync {
     # config, so it can't lock something we are about to unlock. No background guard: no wait.
     if ((Get-WatchState).Text -ne 'running') { return }
     $want = [string]$script:Cfg.saved
-    for ($i = 0; $i -lt 80; $i++) {
-        $s = Read-WatchStatus
-        if ($s -and ([string]$s.config -eq $want)) { return }
-        Start-Sleep -Milliseconds 250
+    Invoke-WithDots '  telling the background guard' {
+        for ($i = 0; $i -lt 80; $i++) {
+            $s = Read-WatchStatus
+            if ($s -and ([string]$s.config -eq $want)) { return }
+            Start-Sleep -Milliseconds 250
+        }
     }
 }
 
@@ -615,20 +692,23 @@ function Cmd-Move($arg) {
         Save-GuardConfig -Config $script:Cfg -User $script:User      # background guard: hands off
         Wait-WatchSync
         Say ""
-        Unlock-GuardTree -Folder $old -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
+        Invoke-WithDots '  unlocking' { Unlock-GuardTree -Folder $old -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null }
         Ok "unlocked" ("folder, folder above, {0} files" -f $nfiles)
-        try { Move-Item -LiteralPath $old -Destination $dest -ErrorAction Stop }
-        catch {
-            Say "  FAIL  move  $($_.Exception.Message)" 'Red'
-            Lock-GuardTree -Folder $old -User $script:User -Skip (Folder-Skip $f) | Out-Null
+        $moveErr = $null
+        Invoke-WithDots '  moving' { try { Move-Item -LiteralPath $old -Destination $dest -ErrorAction Stop } catch { $_ } } | ForEach-Object { $moveErr = $_ }
+        if ($moveErr) {
+            Say "  FAIL  move  $($moveErr.Exception.Message)" 'Red'
+            Invoke-WithDots '  locking again' { Lock-GuardTree -Folder $old -User $script:User -Skip (Folder-Skip $f) | Out-Null }
             $f.editing = $false; Save-GuardConfig -Config $script:Cfg -User $script:User
             Say "  not moved. still protected at the old place." 'Red'
             return
         }
         Ok "moved" $dest
         $f.path = $dest; $f.name = Get-FolderName $dest; $f.editing = $false
-        Set-GuardOwnerSystem -Folder $dest -User $script:User | Out-Null   # other drive = new files, new owner
-        $r = Lock-GuardTree -Folder $dest -User $script:User -Skip (Folder-Skip $f)
+        $r = Invoke-WithDots '  locking' {
+            Set-GuardOwnerSystem -Folder $dest -User $script:User | Out-Null   # other drive = new files, new owner
+            Lock-GuardTree -Folder $dest -User $script:User -Skip (Folder-Skip $f)
+        }
         Ok "locking" ("folder, folder above ({0}), {1} files" -f (Split-Path (Split-Path $dest -Parent) -Leaf), $r.Locked)
         Save-GuardConfig -Config $script:Cfg -User $script:User
         Ok "memory" "_guard.json updated in all folders  ·  new path saved"
@@ -707,7 +787,7 @@ function Cmd-Edit($arg) {
     foreach ($f in $targets) {
         Say ""; Say ("  {0}  ·  {1}  ·  {2} files" -f $f.name, $f.path, $f.editingFiles)
         Say ""
-        Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
+        Invoke-WithDots '  unlocking' { Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null }
         $script:Editing[$f.path] = $true
         Ok "unlocked" ("folder + folder above + {0} files" -f $f.editingFiles)
         if (-not (Test-Quiet)) {
@@ -734,7 +814,7 @@ function Cmd-Resume($arg) {
         }
         if ($targets.Count -gt 1) { Say ("  {0}" -f $f.name) 'Cyan' }
         Say ("  full check   {0}" -f $found)
-        $r = Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f)
+        $r = Invoke-WithDots '  locking' { Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f) }
         $script:Editing.Remove($f.path)
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $false -Force
         Write-Host ("  {0} ok" -f ("locked       folder + folder above + {0} files" -f $r.Locked).PadRight(76)) -ForegroundColor Green
@@ -801,12 +881,16 @@ function Cmd-Init($arg) {
         }
     }
     try {
-        Set-GuardOwnerSystem -Folder $path -User $script:User | Out-Null
-        $r = Lock-GuardTree -Folder $path -User $script:User -Skip @() -ShouldStop $stop
+        $r = Invoke-WithDots '  locking' {
+            Set-GuardOwnerSystem -Folder $path -User $script:User | Out-Null
+            Lock-GuardTree -Folder $path -User $script:User -Skip @() -ShouldStop $stop
+        }
     } finally { if ($null -ne $oldTreat) { try { [Console]::TreatControlCAsInput = $oldTreat } catch { } } }
     if ($r.Stopped) {
-        Unlock-GuardTree -Folder $path -User $script:User -KeepAbove:(Test-AboveShared ([pscustomobject]@{ path = $path })) | Out-Null
-        Set-GuardOwnerUser -Folder $path -User $script:User | Out-Null
+        Invoke-WithDots '  undoing' {
+            Unlock-GuardTree -Folder $path -User $script:User -KeepAbove:(Test-AboveShared ([pscustomobject]@{ path = $path })) | Out-Null
+            Set-GuardOwnerUser -Folder $path -User $script:User | Out-Null
+        }
         Say "  cancelled  ·  everything done so far was undone, nothing is locked" 'Yellow'
         return
     }
@@ -870,11 +954,13 @@ function Cmd-Remove($arg) {
     foreach ($f in $targets) {
         if (-not (Test-Path -LiteralPath $f.path)) { Ok "forgot" ("{0}  (not found)" -f $f.path); continue }
         $n = @(Get-GuardFiles -Folder $f.path).Count
-        Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
         $jp = Join-Path $f.path '_guard.json'
-        Unlock-GuardFile -Path $jp -User $script:User | Out-Null
-        Remove-Item -LiteralPath $jp -Force -EA SilentlyContinue
-        Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
+        Invoke-WithDots '  unlocking' {
+            Unlock-GuardTree -Folder $f.path -User $script:User -KeepAbove:(Test-AboveShared $f) | Out-Null
+            Unlock-GuardFile -Path $jp -User $script:User | Out-Null
+            Remove-Item -LiteralPath $jp -Force -EA SilentlyContinue
+            Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
+        }
         if ($targets.Count -gt 1) { Say ("  {0}" -f $f.name) 'Cyan' }
         Ok "unlocked" ("folder, folder above, {0} files" -f $n)
         Ok "owner" ("folder + {0} files  back to you ({1})" -f $n, ($script:User -split '\\')[-1])
@@ -974,9 +1060,11 @@ function Invoke-GuardRestore {
 
     $files = 0; $locked = 0
     foreach ($f in $found) {
-        # access first: on a new Windows the old account is a stranger, even with the same name
-        Set-GuardOwnerSystem -Folder $f.path -User $script:User | Out-Null
-        $r = Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f)
+        $r = Invoke-WithDots ("  locking {0}" -f $f.name) {
+            # access first: on a new Windows the old account is a stranger, even with the same name
+            Set-GuardOwnerSystem -Folder $f.path -User $script:User | Out-Null
+            Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f)
+        }
         $files += @(Get-GuardFiles -Folder $f.path).Count; $locked += $r.Locked
     }
     Ok "access" ("your account given access to {0} folder(s)" -f $found.Count)
@@ -1201,14 +1289,14 @@ function Open-GuardIssue([string]$Url) {
 $script:InstallDir = $PSScriptRoot
 
 function Cmd-Update {
-    $v = Get-GuardRemoteVersion
+    $v = Invoke-WithDots '  checking for a new version' { Get-GuardRemoteVersion }
     if (-not $v) { Say "  can't reach GitHub right now. try again later." 'Red'; return $true }
     if (-not (Test-GuardNewer $v)) { Say ("  you have the newest version ({0})" -f $script:GuardVersion); return $true }
     $tmp = Join-Path $env:TEMP ('guard-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
-    try {
-        $text = Get-GuardSourceText 'install.ps1'
-        [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($true)))
-    } catch { Say "  download failed: $($_.Exception.Message)" 'Red'; return $true }
+    $text = Invoke-WithDots '  downloading' { try { Get-GuardSourceText 'install.ps1' } catch { $null } }
+    if (-not $text) { Say "  download failed. check the internet connection and try again." 'Red'; return $true }
+    try { [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($true))) }
+    catch { Say "  download failed: $($_.Exception.Message)" 'Red'; return $true }
     & $tmp -Prefix $script:InstallDir -NoElevate -Update -From $script:GuardVersion -To $v -ForUser $script:User
     Remove-Item $tmp -Force -EA SilentlyContinue
     return $false    # the program files changed under us: close, user types guard again
@@ -1222,14 +1310,16 @@ function Cmd-Uninstall {
     if ($a -ne 'YES') { Say "  cancelled"; return $true }
     Say ""
     # 1 stop the background guard first, so nothing locks again behind us
-    Stop-GuardWatch -Dir $script:InstallDir | Out-Null
+    Invoke-WithDots '  stopping the background guard' { Stop-GuardWatch -Dir $script:InstallDir | Out-Null }
     # 2 give every folder back
     foreach ($f in $folders) {
         if (-not (Test-Path -LiteralPath $f.path)) { Ok "skipped" ("{0}  (not found)" -f $f.path); continue }
         $c = @(Get-GuardFiles -Folder $f.path).Count
-        Unlock-GuardTree -Folder $f.path -User $script:User | Out-Null
-        Unlock-GuardFile -Path (Join-Path $f.path '_guard.json') -User $script:User | Out-Null
-        Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
+        Invoke-WithDots ("  unlocking {0}" -f $f.name) {
+            Unlock-GuardTree -Folder $f.path -User $script:User | Out-Null
+            Unlock-GuardFile -Path (Join-Path $f.path '_guard.json') -User $script:User | Out-Null
+            Set-GuardOwnerUser -Folder $f.path -User $script:User | Out-Null
+        }
         Ok "unlocked" ("{0}  ({1} files)  owner back to you" -f $f.path, $c)
     }
     if ($folders.Count) { Ok "kept" "_guard.json in every folder (memory, so a future install can restore)" }
