@@ -349,7 +349,7 @@ Check 'list: shows files' ((Out-Of 'list') -match 'amazon-checkout.png')
 Section 'update line + update to a newer version'
 $fake = Join-Path $env:TEMP ('guard-fake-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory "$fake\src" -Force | Out-Null
-foreach ($f in 'guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1') { Copy-Item "$src\$f" "$fake\src\$f" }
+foreach ($f in 'guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1') { Copy-Item "$src\$f" "$fake\src\$f" }
 Copy-Item "$repo\install.ps1" "$fake\install.ps1"
 $core = (Get-Content "$fake\src\guard-core.ps1" -Raw -Encoding UTF8) -replace "GuardVersion = '1\.0'", "GuardVersion = '1.1'"
 [IO.File]::WriteAllText("$fake\src\guard-core.ps1", $core, (New-Object Text.UTF8Encoding($true)))
