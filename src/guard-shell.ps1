@@ -99,9 +99,12 @@ function Read-GuardInput([string]$Prompt, [switch]$Paths) {
         if ($menu) {
             $n = $menu.Items.Count; $vis = [Math]::Min($maxRows, $n)
             $first = [Math]::Max(0, [Math]::Min($menu.Sel - [Math]::Floor($vis / 2), $n - $vis))
+            # each choice starts right under the word being completed, the > two columns before it
+            $at0 = ($left + $menu.Base.Length) % $w
+            if ($at0 -lt 2 -or $at0 -gt $w - 12) { $at0 = 2 + $m.Length }
             for ($i = $first; $i -lt $first + $vis; $i++) {
                 $mark = '  '; $col = 'Gray'; if ($i -eq $menu.Sel) { $mark = '> '; $col = 'Green' }
-                $rows += ,@(("{0}  {1}{2}" -f $m, $mark, $menu.Items[$i]), $col)
+                $rows += ,@(((' ' * ($at0 - 2)) + $mark + $menu.Items[$i]), $col)
             }
         }
         $below = $top + [Math]::Floor([Math]::Max(0, $left + [Math]::Max($buf.Length, 1) - 1) / $w) + 1

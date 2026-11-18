@@ -4,6 +4,7 @@ Type the first letters, press Tab.
 
 - One match → filled in.
 - Several → filled in as far as they agree, and a list opens under the line. The first one is marked with `>` (green).
+- Each choice starts right under the word being completed, with the `>` two columns before it.
 
 Keys while the list is open:
 
@@ -20,23 +21,23 @@ Keys while the list is open:
 ## 1. Several commands
 
 ```
- guard> e                                       ← e + Tab
-   > edit                                       ← marked (green)
-     exit
+ guard> e                                           ← e + Tab
+      > edit                                        ← marked (green)
+        exit
 ```
 
 ↓:
 
 ```
  guard> e
-     edit
-   > exit                                       ← marked (green)
+        edit
+      > exit                                        ← marked (green)
 ```
 
 Enter:
 
 ```
- guard> exit                                    ← in the line, list closed. Enter again runs it
+ guard> exit                                        ← in the line, list closed. Enter again runs it
 ```
 
 ---
@@ -44,9 +45,9 @@ Enter:
 ## 2. Filled in as far as they agree
 
 ```
- guard> re                                      ← r + Tab: both start with "re"
-   > resume
-     remove
+ guard> re                                          ← r + Tab: both start with "re"
+      > resume
+        remove
 ```
 
 ---
@@ -54,11 +55,11 @@ Enter:
 ## 3. One match
 
 ```
- guard> he                                      ← he + Tab
+ guard> he                                          ← he + Tab
 ```
 
 ```
- guard> help                                    ← filled in, no list
+ guard> help                                        ← filled in, no list
 ```
 
 ---
@@ -66,22 +67,22 @@ Enter:
 ## 4. Typing narrows the list
 
 ```
- guard> help                                    ← help + space + Tab
-   > all
-     list
-     delete
-     move
-     edit
-     resume
-     init
-     remove                                     ← 8 rows at a time, scrolls as the mark moves
+ guard> help                                        ← help + space + Tab
+           > all
+             list
+             delete
+             move
+             edit
+             resume
+             init
+             remove                                 ← 8 rows at a time, scrolls as the mark moves
 ```
 
 Type `li`:
 
 ```
  guard> help li
-   > list                                       ← only one left
+           > list                                   ← only one left
 ```
 
 Enter, Enter:
@@ -98,17 +99,17 @@ Enter, Enter:
 ## 5. File names in the current folder
 
 ```
- guard> delete am                               ← delete am + Tab
-   > amazon-2.png
-     amazon-3.png
-     amazon-checkout.png
+ guard> delete am                                   ← delete am + Tab
+             > amazon-2.png
+               amazon-3.png
+               amazon-checkout.png
 ```
 
 Type `-c`:
 
 ```
  guard> delete amazon-c
-   > amazon-checkout.png
+             > amazon-checkout.png
 ```
 
 ---
@@ -116,24 +117,24 @@ Type `-c`:
 ## 6. Folder paths
 
 ```
- guard> init C:\Users\ojhas\D                   ← init C:\Users\ojhas\D + Tab
-   > C:\Users\ojhas\Desktop
-     C:\Users\ojhas\Documents
-     C:\Users\ojhas\Downloads
+ guard> init C:\Users\ojhas\D                       ← init C:\Users\ojhas\D + Tab
+           > C:\Users\ojhas\Desktop
+             C:\Users\ojhas\Documents
+             C:\Users\ojhas\Downloads
 ```
 
 Type `o`:
 
 ```
  guard> init C:\Users\ojhas\Do
-   > C:\Users\ojhas\Documents
-     C:\Users\ojhas\Downloads
+           > C:\Users\ojhas\Documents
+             C:\Users\ojhas\Downloads
 ```
 
 Esc:
 
 ```
- guard> init C:\Users\ojhas\Do                  ← list closed, the line stays
+ guard> init C:\Users\ojhas\Do                      ← list closed, the line stays
 ```
 
 The same works in the "type a folder path" question of `move folder`.
