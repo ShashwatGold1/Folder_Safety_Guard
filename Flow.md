@@ -54,8 +54,12 @@ guard  installing   [===============---------------]   50%   4/8   path
   ..    path       adding for all users
 ```
 
-Done:
+Done (from a terminal that isn't elevated; the green line appears after the Yes click):
 ```
+
+Requesting Admin Access...
+Admin Access Granted Successfully.                                              ← green
+
 guard  installing   [==============================]  100%   8/8
 
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
@@ -140,12 +144,13 @@ Running the install line again = update in place (see section 11). Protected fol
 ```
 PS> guard
 
-guard runs as administrator. click Yes on the prompt.
+Requesting Admin Access...
 ```
 
-UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
+UAC prompt → Yes → the green line goes right under it, and guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
+Requesting Admin Access...
 Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------
@@ -242,12 +247,13 @@ All three retry at every full check. The status row shows them as `files  51  ·
 ```
 PS> guard
 
-guard runs as administrator. click Yes on the prompt.
+Requesting Admin Access...
 ```
 
-UAC prompt → Yes → guard opens in the same terminal window, below what was already there (no clear screen):
+UAC prompt → Yes → the green line goes right under it, and guard opens in the same terminal window, below what was already there (no clear screen):
 
 ```
+Requesting Admin Access...
 Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------

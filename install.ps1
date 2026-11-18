@@ -13,7 +13,8 @@ param(
     [string]$From = '',             # old version, for the update header
     [string]$To = '',               # new version, for the update header
     [switch]$Pause,                 # keep a window of its own open at the end
-    [int]$AttachTo = 0              # the elevated copy, started hidden: moves into the caller's window
+    [int]$AttachTo = 0,             # the elevated copy, started hidden: moves into the caller's window
+    [switch]$Granted                # set after the UAC click: say so before the progress bar
 )
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -118,7 +119,7 @@ function Join-CallerConsole([int]$CallerPid) {
     } catch { return $false }
 }
 if ($AttachTo) {
-    $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -ForUser `"$who`" -Prefix `"$Prefix`""
+    $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Granted -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $fwd += " -Source `"$Source`"" }
     if (Join-CallerConsole $AttachTo) {
         $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $fwd
@@ -145,11 +146,12 @@ if (-not $self) {
 if (-not (Is-Admin) -and -not $NoElevate) {
     $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -AttachTo $PID -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $a += " -Source `"$Source`"" }
-    Write-Host "guard  asking for administrator (UAC)..."
+    Write-Host ""
+    Write-Host "Requesting Admin Access..."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until the install is done
     try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a; $p.WaitForExit() }
-    catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; return }
+    catch { Write-Host "guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
     try { [Console]::OutputEncoding = $enc } catch { }
     return
 }
@@ -159,6 +161,8 @@ if ($Update) {
     $f = $From; if (-not $f) { $f = '?' }; $t2 = $To; if (-not $t2) { $t2 = 'new' }
     $script:BarWhat = "updating $f $arrow $t2"
 }
+# right under "Requesting Admin Access..." in the same window; Bar-Start adds the blank line after
+if ($Granted) { Write-Host "Admin Access Granted Successfully." -ForegroundColor Green }
 Bar-Start
 
 # 1 check

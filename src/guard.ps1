@@ -42,11 +42,11 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
     Write-Host ""
-    Write-Host "guard runs as administrator. click Yes on the prompt."
+    Write-Host "Requesting Admin Access..."
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until guard exits
     try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $psi; $p.WaitForExit() }
-    catch { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red }
+    catch { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red; Write-Host "" }
     try { [Console]::OutputEncoding = $enc } catch { }
     return
 }
@@ -87,8 +87,9 @@ function Show-AdminWarn {
 }
 
 function Prompt-Loop {
-    # no Clear-Host: guard runs in the user's own terminal, and what was there stays above it
-    Write-Host ""
+    # no Clear-Host: guard runs in the user's own terminal, and what was there stays above it.
+    # After the UAC click the green line goes right under "Requesting Admin Access..."
+    if (-not $Elevated) { Write-Host "" }
     Show-AdminWarn
     Show-Table
     if ($script:Rebuilt) { Write-Host ("memory    rebuilt from {0}" -f $script:Rebuilt) -ForegroundColor Green }
