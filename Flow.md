@@ -20,7 +20,8 @@ Rules used everywhere below:
 - Explorer shows a badge in the bottom-left corner of every protected folder and file (like Google Drive's): green lock = protected · orange lock with the left leg open = `edit` (unlocked) · red `!` = partly locked (a file guard couldn't lock yet, e.g. open in a program, and every folder above it up to the protected one). Files on the skip list get no badge: they are never locked. Badges change by themselves after `init`, `edit`, `resume`, `remove`, `move`, `skip` and at the background guard's checks. The install restarts Explorer once to load them (open Explorer windows close); `uninstall` takes them off, and their helper file goes at the next PC restart.
 - Cloud folders (OneDrive, Google Drive, Dropbox): allowed only when the files are really on the disk ("Always keep on this device" / "Available offline"). `init` checks and refuses otherwise. A delete made from the phone or the web is blocked on the PC; the file stays here. (v2: guard shows those files and asks keep or delete.)
 - Memory: every protected folder holds a hidden, locked `_guard.json` with all settings and the list of every protected folder. `C:\ProgramData\guard\config.json` is only a fast copy. If any protected folder survives a reinstall, disk move or backup, everything can be restored from it.
-- guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard runs right there in the same terminal window (no new window). Everything inside runs with no more prompts. `exit` returns to the terminal; the next `guard` asks again.
+- guard always runs as administrator: typing `guard` shows the UAC prompt once, then guard opens in a window of its own, titled `guard (administrator)`. Everything inside runs with no more prompts. `exit` closes that window; the next `guard` asks again.
+- Why its own window: any program running as you can type into your normal terminal (it attaches to the console and writes key presses), so an AI agent could type `remove` + Enter into a guard running there. A window made by an admin process refuses that, and refuses fake key messages too. `src/redteam.ps1` tries all three on every run.
 - Protected files are owned by SYSTEM, not you. So you, and every program or AI agent running as you, can't delete or unlock them. Only a human clicking Yes on the UAC prompt can. The background guard runs as SYSTEM and locks new files without prompts.
 - Never run an AI agent from an admin terminal: it would inherit full rights. Opened from an admin terminal, guard needs no prompt and shows once, in green: `Admin Access Already Granted.`
 - Everything guard prints starts one space in from the left edge, `guard>` included, and so does the install from `Requesting Admin Access...` on (left out of the screens below to keep them short).
@@ -153,10 +154,17 @@ PS> guard
 Requesting Admin Access...
 ```
 
-UAC prompt → Yes → the green line goes right under it, and guard opens in the same terminal window, below what was already there (no clear screen):
+UAC prompt → Yes → the terminal says where guard is and waits until guard closes:
 
 ```
 Requesting Admin Access...
+guard is open in its own window: only programs with admin rights can type into it.   ← green
+this terminal waits until you close guard.
+```
+
+and guard opens in its own window, `guard (administrator)`:
+
+```
 Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------
@@ -256,10 +264,17 @@ PS> guard
 Requesting Admin Access...
 ```
 
-UAC prompt → Yes → the green line goes right under it, and guard opens in the same terminal window, below what was already there (no clear screen):
+UAC prompt → Yes → the terminal says where guard is and waits until guard closes:
 
 ```
 Requesting Admin Access...
+guard is open in its own window: only programs with admin rights can type into it.   ← green
+this terminal waits until you close guard.
+```
+
+and guard opens in its own window, `guard (administrator)`:
+
+```
 Admin Access Granted Successfully.                                              ← green
 
 -------------------- Guard ---------------------
@@ -945,10 +960,7 @@ guard  installing   [==============================]  100%   9/9
     3  D:\Keep\Invoices                          not found
     4  D:\Keep\Photos                            not found
 
-  Restore protection for the 2 found folders?
-  > 1  yes
-    2  no, start fresh
-  type 1 or 2 or ↑ ↓ then Enter > 1
+  restoring protection  ·  a folder you no longer want: type  remove  in guard
 
   access    your account (ojhas) given access to both folders                   ok
   owner     folders + 59 files        now owned by SYSTEM                        ok
@@ -959,6 +971,7 @@ guard  installing   [==============================]  100%   9/9
   type:  guard                                                                   ← guard in cyan
 ```
 
+- No question in the installer: it runs in your normal terminal, where any program running as you can type, and an injected "no, start fresh" would drop the protection. Restoring is the safe way; `remove` (in guard's own window) drops a folder you no longer want.
 - "access" step: files restored to a new Windows with their old permissions can show "access denied" even to open, because to Windows the new account is a different account even with the same name. Restore grants your current account access first, then locks. That is the only place accounts come into it.
 - The 2 missing folders stay in the list and show `NOT FOUND` in red in the status block, with `next  type  use 3  then  remove  to forget it, or  init <new path>`.
 - `init` on a folder that already has a `_guard.json` asks the same restore question.

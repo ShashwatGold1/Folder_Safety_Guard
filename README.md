@@ -19,7 +19,9 @@ in the same window.
 
 ## Use
 
-Type  guard  in the same window, click Yes, then:
+Type  guard , click Yes. guard opens in a window of its own: only
+programs with admin rights can type into it, so an AI agent can't
+type commands for you. Then:
 
     init
 

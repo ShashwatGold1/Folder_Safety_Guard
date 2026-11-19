@@ -3,8 +3,8 @@
 #   -NoElevate  tests only: run in this process as-is
 #   -ForUser    the signed-in user, captured BEFORE the UAC click: a standard account elevates
 #               as a different (admin) account, and the locks must be for the real user
-#   -AttachTo   the elevated copy, started hidden: moves into this terminal (the caller's pid)
-#   -OwnWindow  fallback when it couldn't: guard runs in a window of its own
+#   -AttachTo   the hidden elevated relay (the caller's pid): opens guard in a window of its own
+#   -OwnWindow  guard runs in a window of its own (always, after the UAC click)
 #   -Caller     the waiting window's pid: told when the green line is about to print
 param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow, [int]$Caller = 0)
 
@@ -12,29 +12,6 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\guard-shell.ps1"
-
-function Join-CallerConsole([int]$CallerPid) {
-    # leave our own hidden console and use the caller's window instead (same as  sudo  inline)
-    try {
-        Add-Type -Namespace GuardCon -Name K -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern bool FreeConsole();
-[DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
-[DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr h, bool add);
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern System.IntPtr CreateFile(string name, uint access, uint share, System.IntPtr sa, uint mode, uint flags, System.IntPtr tmpl);
-[DllImport("kernel32.dll")] public static extern bool SetHandleInformation(System.IntPtr h, uint mask, uint flags);
-[DllImport("kernel32.dll")] public static extern bool SetStdHandle(int which, System.IntPtr h);
-'@
-        [void][GuardCon.K]::FreeConsole()
-        if (-not [GuardCon.K]::AttachConsole($CallerPid)) { return $false }
-        # Ctrl+C must not kill this relay: the caller would return to its prompt with guard still running
-        [void][GuardCon.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)
-        $in  = [GuardCon.K]::CreateFile('CONIN$',  [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
-        $out = [GuardCon.K]::CreateFile('CONOUT$', [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
-        foreach ($h in $in, $out) { [void][GuardCon.K]::SetHandleInformation($h, 1, 1) }   # inheritable
-        [void][GuardCon.K]::SetStdHandle(-10, $in); [void][GuardCon.K]::SetStdHandle(-11, $out); [void][GuardCon.K]::SetStdHandle(-12, $out)
-        return $true
-    } catch { return $false }
-}
 
 # --- elevation -------------------------------------------------------------
 if (-not (Test-GuardAdmin) -and -not $NoElevate) {
@@ -44,25 +21,29 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
     Write-Host ""
     $enc = [Console]::OutputEncoding
-    # hidden: it moves into this window, and this one waits until guard exits
+    # the hidden admin relay opens guard in a window of its own; this one waits until guard exits
     $p = Request-GuardAdmin 'Requesting Admin Access' $psi
-    if ($p) { $p.WaitForExit() }
+    if ($p) {
+        Write-Host "guard is open in its own window: only programs with admin rights can type into it." -ForegroundColor Green
+        Write-Host "this terminal waits until you close guard."
+        $p.WaitForExit()
+    }
     else { Write-Host "guard needs administrator. the prompt was cancelled." -ForegroundColor Red; Write-Host "" }
     try { [Console]::OutputEncoding = $enc } catch { }
     return
 }
 if ($AttachTo) {
     $c = $Cwd; if ($c.EndsWith('\')) { $c += '.' }
-    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Caller $AttachTo -Cwd `"$c`" -ForUser `"$ForUser`""
-    if (Join-CallerConsole $AttachTo) {
-        $si = New-Object Diagnostics.ProcessStartInfo (Get-GuardPowerShellExe), $psi
-        $si.UseShellExecute = $false        # inherits the caller's window
-        $p = [Diagnostics.Process]::Start($si); $p.WaitForExit(); exit $p.ExitCode
-    }
-    Start-Process (Get-GuardPowerShellExe) -ArgumentList "$psi -OwnWindow"
-    exit
+    $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Caller $AttachTo -Cwd `"$c`" -ForUser `"$ForUser`" -OwnWindow"
+    # Never in the caller's terminal: that console belongs to a normal process, so any program
+    # running as the user can attach to it and type commands (WriteConsoleInput) that the
+    # elevated guard would run - proven by redteam.ps1. A console made by an admin process
+    # refuses programs without admin rights, and its window is shielded from their fake keys.
+    $p = Start-Process (Get-GuardPowerShellExe) -ArgumentList $psi -PassThru
+    $p.WaitForExit(); exit $p.ExitCode
 }
 if ($Cwd) { try { Set-Location -LiteralPath $Cwd -ErrorAction Stop } catch { } }
+if ($OwnWindow) { try { $Host.UI.RawUI.WindowTitle = 'guard (administrator)' } catch { } }
 
 # opened straight inside a terminal that was already admin: agents in it could unlock files
 $script:AdminWarn = ((Test-GuardAdmin) -and -not $Elevated -and -not $NoElevate)
@@ -91,8 +72,8 @@ function Show-AdminWarn {
 }
 
 function Prompt-Loop {
-    # no Clear-Host: guard runs in the user's own terminal, and what was there stays above it.
-    # After the UAC click the green line goes right under "Requesting Admin Access..."
+    # no Clear-Host: in an already-admin terminal guard runs inline, and what was there stays
+    # above it. After the UAC click guard has a window of its own.
     if (-not $Elevated) { Write-Host "" }
     Show-AdminWarn
     Show-Table

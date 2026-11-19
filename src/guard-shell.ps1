@@ -1198,7 +1198,8 @@ function Cmd-Use($arg) {
 function Invoke-GuardRestore {
     # Shows the folders an old _guard.json lists, asks once, then protects the ones that exist.
     # Returns $true if restored, $false if the user chose to start fresh.
-    param($Memory, [string]$Where)
+    # -NoAsk: restore without the question (the installer: it runs in the user's normal terminal)
+    param($Memory, [string]$Where, [switch]$NoAsk)
     # a _guard.json sits in a normal folder: any program could have written it. So the list
     # goes through the same checks as init (no drive, no Windows or program folders...), and
     # skip lists from it are not taken over: a planted '*' would leave everything unlocked.
@@ -1221,7 +1222,8 @@ function Invoke-GuardRestore {
     }
     $found = @($list | Where-Object { Test-Path -LiteralPath $_.path -PathType Container })
     if ($found.Count -eq 0) { Say "  none of them exist on this PC"; return $false }
-    if (-not (Confirm-YesNo ("Restore protection for the {0} found folders?" -f $found.Count) 'no, start fresh')) { Say "  starting fresh"; return $false }
+    if ($NoAsk) { Say "  restoring protection  ·  a folder you no longer want: type  remove  in guard" 'DarkGray' }
+    elseif (-not (Confirm-YesNo ("Restore protection for the {0} found folders?" -f $found.Count) 'no, start fresh')) { Say "  starting fresh"; return $false }
 
     $files = 0; $locked = 0; $bad = 0
     foreach ($f in $found) {

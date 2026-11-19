@@ -440,7 +440,9 @@ Write-Host "  Guard is Installed Successfully." -ForegroundColor Green
 
 if ($restoreFrom) {
     $script:Cfg = New-GuardConfig
-    $ok = Invoke-GuardRestore -Memory $restoreFrom -Where $script:MemoryFoundIn
+    # no question here: this window is the user's normal terminal, where any program running as
+    # the user can type, and "2 = start fresh" would drop the protection. Restoring is the safe way.
+    $ok = Invoke-GuardRestore -Memory $restoreFrom -Where $script:MemoryFoundIn -NoAsk
     # start fresh = write an empty config, so guard doesn't silently rebuild from the old memory later
     if (-not $ok) { Save-GuardConfig -Config $script:Cfg -User $u }
     Write-Host ""

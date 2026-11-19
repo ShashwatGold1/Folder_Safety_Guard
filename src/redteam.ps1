@@ -147,6 +147,78 @@ try {
     }
 
     # -----------------------------------------------------------------------------------------
+    Section 'typing into the elevated guard: the terminal, its own window, fake key messages'
+    # The user's terminal is a normal (medium) console: any program running as the user can
+    # attach to it and write key presses (WriteConsoleInput). Before this fix guard ran inside it
+    # and did what such a program typed (init, remove + Enter, exit: tried on this PC). Now the
+    # elevated guard has a console of its own, made by an admin process.
+    $pidF = Join-Path $work 'host.pid'; $victim = Join-Path $work 'inj-victim'
+    New-Item -ItemType Directory $victim -Force | Out-Null; 'x' | Set-Content "$victim\a.txt"
+    $hostTask = "guard-redteam-host-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $hps1 = Join-Path $work 'host.ps1'; [IO.File]::WriteAllText($hps1, "`$PID | Set-Content '$pidF'; Start-Sleep 180", (New-Object Text.UTF8Encoding($true)))
+    $relay = $null
+    try {
+        # the user's terminal: a normal PowerShell that owns a console
+        Register-ScheduledTask -TaskName $hostTask -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) -Force `
+            -Action (New-ScheduledTaskAction -Execute $psExe -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$hps1`"") | Out-Null
+        Start-ScheduledTask -TaskName $hostTask
+        for ($i = 0; $i -lt 80 -and -not (Test-Path $pidF); $i++) { Start-Sleep -Milliseconds 250 }
+        $hostPid = [int](Get-Content $pidF)
+        # the real elevated guard, started the way the UAC click starts it (the hidden relay)
+        $relay = Start-Process $psExe -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$src\guard.ps1`" -AttachTo $hostPid -Cwd `"$work`" -ForUser `"$user`""
+        $gp = $null
+        for ($i = 0; $i -lt 120 -and -not $gp; $i++) {
+            Start-Sleep -Milliseconds 250
+            $gp = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match '-Elevated' -and $_.CommandLine -match [regex]::Escape("$src\guard.ps1") } | Select-Object -First 1
+        }
+        $gpid = [int]$gp.ProcessId; $hwnd = 0
+        for ($i = 0; $i -lt 40 -and -not $hwnd; $i++) { Start-Sleep -Milliseconds 250; $hwnd = [int64](Get-Process -Id $gpid -EA SilentlyContinue).MainWindowHandle }
+        Check 'the elevated guard is running, in a window of its own' ($gpid -and $hwnd)
+        $cs = @'
+using System; using System.Text; using System.Threading; using System.Runtime.InteropServices;
+public static class Inj {
+  [StructLayout(LayoutKind.Explicit, CharSet=CharSet.Unicode)] public struct KR {
+    [FieldOffset(0)] public ushort T; [FieldOffset(4)] public int Down; [FieldOffset(8)] public ushort Rep;
+    [FieldOffset(10)] public ushort Vk; [FieldOffset(12)] public ushort Scan; [FieldOffset(14)] public char Ch; [FieldOffset(16)] public uint Ctl; }
+  [DllImport("kernel32.dll")] static extern bool FreeConsole();
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(int p);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern IntPtr CreateFile(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool WriteConsoleInputW(IntPtr h, KR[] r, uint n, out uint w);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessageW(IntPtr w, uint m, IntPtr wp, IntPtr lp);
+  [DllImport("user32.dll")] static extern short VkKeyScanW(char c);
+  public static string Type(int p, string text) {          // attach to p's console, type text + Enter
+    FreeConsole(); if (!AttachConsole(p)) return "attach refused " + Marshal.GetLastWin32Error();
+    IntPtr h = CreateFile("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+    var l = new System.Collections.Generic.List<KR>();
+    foreach (char c in text + "\r") { short k = c == '\r' ? (short)0x0D : VkKeyScanW(c); ushort vk = (ushort)(k & 0xFF); uint ctl = (c != '\r' && (k & 0x100) != 0) ? 0x10u : 0u;
+      l.Add(new KR { T = 1, Down = 1, Rep = 1, Vk = vk, Ch = c, Ctl = ctl }); l.Add(new KR { T = 1, Down = 0, Rep = 1, Vk = vk, Ch = c, Ctl = ctl }); }
+    uint w; return WriteConsoleInputW(h, l.ToArray(), (uint)l.Count, out w) ? "wrote " + w : "write refused " + Marshal.GetLastWin32Error(); }
+  public static string Post(long hwnd, string text) {       // WM_CHAR key messages to a window
+    foreach (char c in text + "\r") { if (!PostMessageW((IntPtr)hwnd, 0x0102, (IntPtr)c, (IntPtr)1)) return "post refused " + Marshal.GetLastWin32Error(); }
+    return "posted"; }
+}
+'@
+        $r = Run-As Limited ("Add-Type -TypeDefinition @'`n$cs`n'@`n" +
+            "'terminal: ' + [Inj]::Type($hostPid, 'init $victim') | Add-Content `$log`n" +
+            "'guard console: ' + [Inj]::Type($gpid, 'init $victim') | Add-Content `$log`n" +
+            "'guard window: ' + [Inj]::Post($hwnd, 'init $victim') | Add-Content `$log`n" +
+            "Start-Sleep 1; 'guard console exit: ' + [Inj]::Type($gpid, 'exit') | Add-Content `$log") 60
+        Info ("attacker: " + ($r -join ' | '))
+        Start-Sleep 6   # time for guard to act, if anything got through
+        Check "typing into the user's terminal reaches nothing: guard doesn't read it" ((Test-Path "$victim\a.txt") -and -not (Test-Path "$victim\_guard.json") -and ((Get-Acl $victim).Owner -notmatch 'SYSTEM'))
+        Check "a program without admin can not attach to guard's own console" (@($r | Where-Object { $_ -match '^guard console( exit)?: attach refused' }).Count -eq 2)
+        Check "a program without admin can not post key messages to guard's window" ($r -match '^guard window: post refused')
+        Check 'guard still running: the typed exit never arrived' ($null -ne (Get-Process -Id $gpid -EA SilentlyContinue))
+    } finally {
+        if ($relay -and -not $relay.HasExited) { Stop-Process -Id $relay.Id -Force -EA SilentlyContinue }
+        Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match [regex]::Escape("$src\guard.ps1") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
+        Stop-ScheduledTask -TaskName $hostTask -EA SilentlyContinue; Unregister-ScheduledTask -TaskName $hostTask -Confirm:$false -EA SilentlyContinue
+        icacls $victim /setowner $user /T /C *> $null; icacls $work /reset /T /C *> $null
+        Remove-Item $victim -Recurse -Force -EA SilentlyContinue
+        Remove-Item -LiteralPath $data -Recurse -Force -EA SilentlyContinue
+    }
+
+    # -----------------------------------------------------------------------------------------
     Section 'a planted _guard.json (memory) asks guard to restore'
     $tf = Join-Path $work 'restore-me'; New-Item -ItemType Directory $tf -Force | Out-Null; Set-Content "$tf\secret.txt" 'x'
     $mem = [pscustomobject]@{ folders = @([pscustomobject]@{ path = (Split-Path ([Environment]::SystemDirectory) -Parent); name = 'Windows'; skip = @() },
