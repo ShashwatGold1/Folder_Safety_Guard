@@ -350,6 +350,22 @@ function Ok([string]$label, [string]$detail, [string]$meaning = '') {
     if ($meaning) { $body = "{0,-9} {1,-25} {2}" -f $label, $detail, $meaning }
     Write-Host ("  {0} ok" -f $body.PadRight(76)) -ForegroundColor Green
 }
+function Show-LockProblems($r, [string]$Name, [string]$Path) {
+    # $r: what Lock-GuardTree returned. Prints, in red, every part that is NOT protected and
+    # returns how many there are: a lock that failed is never shown as done.
+    $n = 0
+    if (-not $r.FolderOk) {
+        $why = $r.FolderRes.FolderOut; if ($r.FolderRes.Folder) { $why = $r.FolderRes.AboveOut }
+        Say ("  FAIL  {0}  folder not locked  ·  {1}" -f $Name, (([string]$why -split "`n")[0])) 'Red'; $n++
+    }
+    foreach ($x in @($r.Failed)) { Say ("  FAIL  {0}  not locked  ·  {1}" -f $x.Name, (([string]$x.Reason -split "`n")[0])) 'Red'; $n++ }
+    # owner SYSTEM is what stops you (or an agent as you) from taking the lock off: check it really is
+    if ((Test-GuardAdmin) -and $Path) {
+        $o = $null; try { $o = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+        if ($o -ne 'S-1-5-18') { Say ("  FAIL  {0}  owner is not SYSTEM: the lock could be taken off" -f $Name) 'Red'; $n++ }
+    }
+    return $n
+}
 function Format-Size([double]$b) {
     if ($b -ge 1GB) { return '{0:0.0} GB' -f ($b / 1GB) }
     if ($b -ge 1MB) { return '{0:0.0} MB' -f ($b / 1MB) }
@@ -950,7 +966,7 @@ function Cmd-Resume($arg) {
         $r = Invoke-WithDots '  locking' { Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f) }
         $script:Editing.Remove($f.path)
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $false -Force
-        Write-Host ("  {0} ok" -f ("locked       folder + folder above + {0} files" -f $r.Locked).PadRight(76)) -ForegroundColor Green
+        if (-not (Show-LockProblems $r $f.name $f.path)) { Write-Host ("  {0} ok" -f ("locked       folder + folder above + {0} files" -f $r.Locked).PadRight(76)) -ForegroundColor Green }
         foreach ($x in $r.Waiting) { Say ("  not locked yet   {0}   {1}" -f $x.Reason, $x.Name) 'Yellow' }
     }
     Save-GuardConfig -Config $script:Cfg -User $script:User
@@ -1029,10 +1045,13 @@ function Cmd-Init($arg) {
     }
 
     $above = Split-Path (Split-Path $path -Parent) -Leaf; if (-not $above) { $above = Split-Path $path -Parent }
-    Ok "owner"   ("folder + {0} files" -f $files.Count) "now owned by SYSTEM"
-    Ok "locking" "folder" "can't be deleted or renamed"
-    Ok "locking" ("folder above ({0})" -f $above) "can't delete inside using the folder key"
-    Ok "locking" ("{0} files" -f $r.Locked) "can't be deleted"
+    $bad = Show-LockProblems $r $name $path
+    if (-not $bad) {
+        Ok "owner"   ("folder + {0} files" -f $files.Count) "now owned by SYSTEM"
+        Ok "locking" "folder" "can't be deleted or renamed"
+        Ok "locking" ("folder above ({0})" -f $above) "can't delete inside using the folder key"
+        Ok "locking" ("{0} files" -f $r.Locked) "can't be deleted"
+    }
     $entry = [pscustomobject]@{ path=$path; name=$name; skip=@(); added=(Get-Date).ToString('o') }
     $script:Cfg.folders += $entry
     $script:Cfg.current = $script:Cfg.folders.Count - 1
@@ -1053,7 +1072,10 @@ function Cmd-Init($arg) {
             Say ("    {0}  {1,-34} {2}" -f $g.Count, $g.Name, (($g.Group | ForEach-Object Name) -join ', '))
         }
     }
-    Say ""; Say "  Folder is Protected Successfully." 'Green'
+    if ($bad) {
+        Say ""; Say ("  Folder is NOT fully protected: {0} problem(s) above." -f $bad) 'Red'
+        Say "  what is locked stays locked. fix the cause, then type  resume  to try again" 'Red'
+    } else { Say ""; Say "  Folder is Protected Successfully." 'Green' }
     Say ("  path        {0}" -f $path)
     $lk = "  locked      {0} of {1} files" -f $r.Locked, ($files.Count - $r.Skipped)
     if ($hadOthers -gt 0) { $lk += "  ·  switched to this folder" }
@@ -1201,7 +1223,7 @@ function Invoke-GuardRestore {
     if ($found.Count -eq 0) { Say "  none of them exist on this PC"; return $false }
     if (-not (Confirm-YesNo ("Restore protection for the {0} found folders?" -f $found.Count) 'no, start fresh')) { Say "  starting fresh"; return $false }
 
-    $files = 0; $locked = 0
+    $files = 0; $locked = 0; $bad = 0
     foreach ($f in $found) {
         $r = Invoke-WithDots ("  locking {0}" -f $f.name) {
             # access first: on a new Windows the old account is a stranger, even with the same name
@@ -1209,10 +1231,13 @@ function Invoke-GuardRestore {
             Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f)
         }
         $files += @(Get-GuardFiles -Folder $f.path).Count; $locked += $r.Locked
+        $bad += Show-LockProblems $r $f.name $f.path
     }
-    Ok "access" ("your account given access to {0} folder(s)" -f $found.Count)
-    Ok "owner" ("folders + {0} files now owned by SYSTEM" -f $files)
-    Ok "locking" ("folders, folders above, {0} files" -f $locked)
+    if (-not $bad) {
+        Ok "access" ("your account given access to {0} folder(s)" -f $found.Count)
+        Ok "owner" ("folders + {0} files now owned by SYSTEM" -f $files)
+        Ok "locking" ("folders, folders above, {0} files" -f $locked)
+    }
 
     # merge: keep what we already protect, add the remembered ones
     $known = @($script:Cfg.folders | ForEach-Object { $_.path })
@@ -1228,6 +1253,11 @@ function Invoke-GuardRestore {
     if ($missing) { $m += ("  ·  {0} missing kept in the list" -f $missing) }
     Ok "memory" $m
     if (@($Memory.folders | Where-Object { $_.skip -and @($_.skip).Count }).Count) { Say "  skip lists from the memory were not taken over: add them again with  skip <pattern>" 'DarkGray' }
+    if ($bad) {
+        Say ""; Say ("  {0} Folder(s) NOT fully protected: {1} problem(s) above." -f $found.Count, $bad) 'Red'
+        Say "  what is locked stays locked. fix the cause, then type  resume all  to try again" 'Red'
+        return $true
+    }
     Say ""; if ($found.Count -eq 1) { Say "  Folder is Protected Successfully." 'Green' } else { Say ("  {0} Folders are Protected Successfully." -f $found.Count) 'Green' }
     return $true
 }

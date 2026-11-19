@@ -88,6 +88,14 @@ Check "sizes in KB / MB" (((Format-Size 1258291) -eq '1.2 MB') -and ((Format-Siz
 Check "help: the long table" ((Show-HelpTable 6>&1 | Out-String) -match 'no question asked')
 Check "error report has no paths" (-not ((New-GuardIssueUrl -Command 'delete C:\Users\me\x.png' -Message 'Access to C:\Users\me\x.png is denied' -Where 'at Cmd-Delete') -match 'Users'))
 
+Write-Host "`n== a lock that fails is never shown as done ==" -ForegroundColor Cyan
+$realUser = $script:User; $script:User = ''   # an empty account name: every lock refuses it
+$o = (Invoke-GuardCommand "init $(Join-Path $root 'sub')" 6>&1 | Out-String)
+$script:User = $realUser
+Check "failed init says NOT fully protected" ($o -match 'NOT fully protected')
+Check "failed init never says Successfully"  (-not ($o -match 'Protected Successfully'))
+Check "failed init lists what isn't locked"  ($o -match 'FAIL\s+sub\s+folder not locked')
+
 Write-Host "`n== cleanup: remove all, verify unlocked ==" -ForegroundColor Cyan
 Feed @()
 $script:InputQueue = New-Object System.Collections.Queue; $script:InputQueue.Enqueue('YES')   # remove all needs YES
