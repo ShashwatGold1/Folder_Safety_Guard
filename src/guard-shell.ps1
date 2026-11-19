@@ -1501,21 +1501,30 @@ function Open-GuardIssue([string]$Url) {
 $script:InstallDir = $PSScriptRoot
 
 function Cmd-Update {
-    $v = Invoke-WithDots '  checking for a new version' { Get-GuardRemoteVersion }
-    if (-not $v) { Say "  can't reach GitHub right now. try again later." 'Red'; return $true }
+    $r = Invoke-WithDots '  checking for a new version' { Get-GuardRelease }
+    if (-not $r.Ok -and $r.Offline) { Say "  can't reach GitHub right now. try again later." 'Red'; return $true }
+    if (-not $r.Ok) {
+        Say ("  update refused: {0}." -f $r.Why) 'Red'
+        Say "  nothing was changed. if this stays, the guard files on GitHub may have been tampered with." 'Red'
+        return $true
+    }
+    $v = [string]$r.Release.version
     if (-not (Test-GuardNewer $v)) { Say ("  you have the newest version ({0})" -f $script:GuardVersion); return $true }
     # not the Temp folder: any program can swap a file there before the elevated guard runs it.
-    # staging\ is inside the program folder, where only administrators can write.
-    $stage = Join-Path $script:InstallDir 'staging'
-    $tmp = Join-Path $stage ('install-' + [guid]::NewGuid().ToString('N') + '.ps1')
-    $text = Invoke-WithDots '  downloading' { try { Get-GuardSourceText 'install.ps1' } catch { $null } }
-    if (-not $text) { Say "  download failed. check the internet connection and try again." 'Red'; return $true }
+    # staging\ is inside the program folder, where only administrators can write. Every file is
+    # checked against the signed list first; the installer then copies only these files.
+    $stage = Join-Path $script:InstallDir ('staging\update-' + [guid]::NewGuid().ToString('N'))
     try {
-        if (-not (Test-Path -LiteralPath $stage)) { New-Item -ItemType Directory -Path $stage -Force | Out-Null }
-        [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($true)))
-    } catch { Say "  download failed: $($_.Exception.Message)" 'Red'; return $true }
-    & $tmp -Prefix $script:InstallDir -NoElevate -Update -From $script:GuardVersion -To $v -ForUser $script:User
-    Remove-Item $tmp -Force -EA SilentlyContinue
+        $err = Invoke-WithDots '  downloading and checking' {
+            try { New-Item -ItemType Directory -Path $stage -Force | Out-Null; Save-GuardReleaseFiles $r.Release $stage; $null } catch { $_.Exception.Message }
+        }
+        if ($err) {
+            Say ("  update refused: {0}." -f $err) 'Red'
+            Say "  nothing was changed." 'Red'
+            return $true
+        }
+        & (Join-Path $stage 'install.ps1') -Prefix $script:InstallDir -Source $stage -NoElevate -Update -From $script:GuardVersion -To $v -ForUser $script:User
+    } finally { Remove-Item -LiteralPath $stage -Recurse -Force -EA SilentlyContinue }
     return $false    # the program files changed under us: close, user types guard again
 }
 

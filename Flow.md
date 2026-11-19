@@ -3,7 +3,7 @@
 Rules used everywhere below:
 - Command table shows only at start and after `cls`, followed by every protected folder, one block under the other. Every other prompt shows only the current folder's block.
 - The status block sits between two separator lines. `update` and `next` lines come after the bottom one, then a blank line, then `guard>`. `next` appears only when something needs you, and says what to type.
-- The background guard checks GitHub for a newer version every 6 hours. Nothing installs by itself. A yellow `update` line then sits between the separator and `next`: `update  New version is available. Type  update  to keep guard up to date.` Offline → nothing.
+- The background guard checks GitHub for a newer signed version every 6 hours (section 11). Nothing installs by itself. A yellow `update` line then sits between the separator and `next`: `update  New version is available. Type  update  to keep guard up to date.` Offline → nothing.
 - Chrome (and any program) can always add new files to a protected folder. Only delete and rename of existing files is blocked. A new file is locked the moment it is finished.
 - Every command that touches many files prints the count and asks once.
 - `<name>` is a partial match. One match → acts. Many → numbered picker.
@@ -822,7 +822,7 @@ guard  updating 1.0 → 1.1   [==============================]  100%   9/9
   ok    check      PowerShell 5.1 · Windows 11 · user ojhas
   ok    uac        on · admin rights granted
   ok    folder     C:\Program Files\guard  (already there)
-  ok    files      1 of 6 files updated · guard.cmd same
+  ok    files      1 of 7 files updated · guard.cmd same
   ok    path       already there
   ok    task       "guard" · runs as SYSTEM · at logon · hidden · restarts itself if it stops
   ok    guard      background guard restarted
@@ -841,6 +841,23 @@ guard> update
   ...status...
 guard>
 ```
+
+Only signed releases. On GitHub, `release.json` lists the version, one commit and the SHA-256 of every file; `release.sig` is its signature, made with the release key in the publisher's TPM chip (needs a PIN and admin rights, can't be copied out). The public half of that key is written in guard itself (`guard-core.ps1`, `install.ps1`).
+- `update` and the install line take the list only if the signature is right, download every file from **that commit** (never from main as it is), check each hash, and only then stop the background guard and write anything. An older signed version is never taken.
+- Someone in the GitHub account, or an AI agent pushing code, can change main but can't make a list the key accepts:
+```
+guard> update
+  update refused: src/guard-watch.ps1 from GitHub doesn't match the signed release list.
+  nothing was changed.                                                           ← red
+```
+```
+guard> update
+  update refused: the release list is not signed with the guard release key.
+  nothing was changed. if this stays, the guard files on GitHub may have been tampered with.   ← red
+```
+- The background guard's 6-hourly check shows the yellow `update` line only for a signed newer version.
+- Publishing (maintainer only): `src/guard-sign.ps1 -Setup` once, then `src/guard-sign.ps1` per release, in a normal terminal. git runs there without admin rights (hooks and settings in `.git` can be planted by any program). The signer opens in an admin window of its own, downloads the commit from GitHub itself, checks that the key written in that commit is the TPM's key, shows version + commit, and needs `YES` and the PIN.
+- Left open: the very first install trusts the install line as it is (there is no earlier guard to check it). Every update after that is checked.
 
 ---
 

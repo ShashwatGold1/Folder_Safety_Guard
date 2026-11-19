@@ -17,6 +17,13 @@ Command Prompt (cmd) :
 Click Yes on the Windows prompt (UAC must be on). Everything runs
 in the same window.
 
+guard installs and updates only a signed release: a list of every
+file's SHA-256, signed with a key inside the publisher's TPM chip
+(PIN + admin rights to use, can't be copied out). A changed file, a
+changed list or a list signed with any other key is refused, so
+someone who breaks into the GitHub account, or an AI agent pushing
+code, can't ship anything guard runs.
+
 ## Use
 
 Type  guard , click Yes. guard opens in a window of its own: only
@@ -50,3 +57,8 @@ Inside guard:
 Tests: src/run-tests.ps1, src/verify-e2e.ps1 (admin), src/redteam.ps1
 (admin: attacks guard from a program without admin rights; every
 attack must fail).
+
+Publishing (maintainer): in a normal terminal in the repo,
+src/guard-sign.ps1 -Setup once (makes the TPM key, asks a new PIN),
+then src/guard-sign.ps1 for every release (asks admin, shows what it
+signs, needs YES + the PIN).

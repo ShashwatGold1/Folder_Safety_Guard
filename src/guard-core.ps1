@@ -4,8 +4,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:GuardVersion = '1.0'
-$script:GuardRepo    = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
-$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
+$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1')
 $script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
 # ---- paths a program without admin rights can't redirect --------------------------------
@@ -113,27 +112,80 @@ function Test-GuardShimFor([string]$Dir) {
     return ((Test-Path -LiteralPath $p) -and ([IO.File]::ReadAllText($p) -like "*`"$Dir\guard.ps1`"*"))
 }
 
-function Get-GuardSourceText {
-    # Text of one file from the newest guard: GitHub, or GUARD_SOURCE (a local folder) in tests.
-    # install.ps1 sits in the repo root, everything else in src/.
-    param([string]$Name)
-    $srcDir = Get-GuardTestEnv 'GUARD_SOURCE'
-    if ($srcDir) {
-        $p = Join-Path $srcDir $Name
-        if (-not (Test-Path -LiteralPath $p)) { $p = Join-Path (Split-Path $srcDir -Parent) $Name }
-        return Get-Content -LiteralPath $p -Raw -Encoding UTF8 -ErrorAction Stop
+# ---- signed releases ----------------------------------------------------------------------
+# guard installs and updates only files listed in a release list (release.json: version, commit,
+# SHA-256 of every file) signed with the release key. That key lives in the TPM chip of the
+# publisher's PC, needs a PIN and administrator rights to use, and can't be copied out. Someone
+# who gets into the GitHub account (or an AI agent pushing code) can change main, but can't make
+# a list this key accepts. guard-sign.ps1 -Setup writes the key below (and the same in install.ps1).
+$script:GuardReleaseKey  = ''
+$script:GuardReleaseBase = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard'
+
+function Get-GuardReleaseKey {
+    $k = Get-GuardTestEnv 'GUARD_RELEASE_KEY'; if ($k) { return $k }
+    return $script:GuardReleaseKey
+}
+function Get-GuardReleaseBase {
+    $b = Get-GuardTestEnv 'GUARD_RELEASE_URL'; if ($b) { return $b.TrimEnd('/') }
+    return $script:GuardReleaseBase
+}
+function Get-GuardReleaseFiles {
+    # every file a release lists, as its path in the repo
+    return @('install.ps1') + @($script:GuardRuntime | ForEach-Object { "src/$_" })
+}
+function Get-GuardBytes([string]$Url) {
+    # raw bytes: hashes are over exactly what was served (https, or file:// in tests)
+    $w = New-Object Net.WebClient
+    try { return $w.DownloadData($Url) } finally { $w.Dispose() }
+}
+function Get-GuardSha256([byte[]]$Bytes) {
+    return -join ([Security.Cryptography.SHA256]::Create().ComputeHash($Bytes) | ForEach-Object { $_.ToString('x2') })
+}
+function Test-GuardReleaseSig([byte[]]$Data, [byte[]]$Sig, [string]$Key) {
+    # RSA-2048+ PKCS#1 SHA-256 over the exact bytes; $Key = base64 modulus, exponent 65537
+    if (-not $Key -or -not $Data -or -not $Sig) { return $false }
+    try {
+        $p = New-Object Security.Cryptography.RSAParameters
+        $p.Modulus = [Convert]::FromBase64String($Key); $p.Exponent = [byte[]](1, 0, 1)
+        if ($p.Modulus.Length -lt 256) { return $false }
+        $rsa = New-Object Security.Cryptography.RSACng; $rsa.ImportParameters($p)
+        return $rsa.VerifyData($Data, $Sig, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    } catch { return $false }
+}
+function Read-GuardRelease([byte[]]$Json, [byte[]]$Sig, [string]$Key) {
+    # the release list, only when the signature is right and every field is well formed; else throws
+    if (-not $Key) { throw 'this guard has no release key yet: no update can be checked' }
+    if (-not (Test-GuardReleaseSig $Json $Sig $Key)) { throw 'the release list is not signed with the guard release key' }
+    $o = (New-Object Text.UTF8Encoding($false)).GetString($Json) | ConvertFrom-Json
+    if ($o.name -ne 'guard' -or "$($o.version)" -notmatch '^\d+(\.\d+){1,3}$' -or "$($o.commit)" -notmatch '^[0-9a-f]{40}$') { throw 'the release list is malformed' }
+    foreach ($f in Get-GuardReleaseFiles) { if ("$($o.files.$f)" -notmatch '^[0-9a-f]{64}$') { throw "the release list has no hash for $f" } }
+    return $o
+}
+function Get-GuardRelease {
+    # @{ Ok; Release; Why; Offline }: the newest signed release list from GitHub
+    $base = Get-GuardReleaseBase
+    try { $j = Get-GuardBytes "$base/main/release.json"; $s = Get-GuardBytes "$base/main/release.sig" }
+    catch { return @{ Ok = $false; Offline = $true; Why = "can't reach GitHub" } }
+    try {
+        $sig = [Convert]::FromBase64String(([Text.Encoding]::ASCII.GetString($s)).Trim())
+        return @{ Ok = $true; Release = (Read-GuardRelease $j $sig (Get-GuardReleaseKey)) }
+    } catch { return @{ Ok = $false; Offline = $false; Why = $_.Exception.Message } }
+}
+function Save-GuardReleaseFiles($Release, [string]$Dir) {
+    # downloads every file of the release from ITS commit, checks each hash, writes them flat in
+    # $Dir (an admin-only folder). Any mismatch: throws, and nothing in $Dir may be used.
+    $base = Get-GuardReleaseBase
+    foreach ($f in Get-GuardReleaseFiles) {
+        $b = Get-GuardBytes "$base/$($Release.commit)/$f"
+        if ((Get-GuardSha256 $b) -ne $Release.files.$f) { throw "$f from GitHub doesn't match the signed release list" }
+        [IO.File]::WriteAllBytes((Join-Path $Dir (Split-Path $f -Leaf)), $b)
     }
-    $sub = 'src/'; if ($Name -eq 'install.ps1') { $sub = '' }
-    # a download keeps a BOM as its first character: strip it (callers write their own)
-    return (Invoke-WebRequest "$script:GuardRepo/$sub$Name" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content.TrimStart([char]0xFEFF)
 }
 
 function Get-GuardRemoteVersion {
-    # Newest version number, or $null when offline.
-    try {
-        $t = Get-GuardSourceText 'guard-core.ps1'
-        if ($t -match "GuardVersion\s*=\s*'([\d\.]+)'") { return $Matches[1] }
-    } catch { }
+    # Newest SIGNED version number, or $null when offline or not signed.
+    $r = Get-GuardRelease
+    if ($r.Ok) { return [string]$r.Release.version }
     return $null
 }
 

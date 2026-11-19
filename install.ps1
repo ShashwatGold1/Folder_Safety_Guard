@@ -21,8 +21,12 @@ param(
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $dot = [string][char]0x00B7; $arrow = [string][char]0x2192
 $ErrorActionPreference = 'Stop'
-$repo = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
-$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
+$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1')
+# Signed releases (see guard-core.ps1): files come only from the commit named in release.json,
+# and only when that list is signed with this key and every hash matches. Never from main as is.
+# guard-sign.ps1 -Setup writes the key here and in guard-core.ps1.
+$releaseKey  = ''
+$releaseBase = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard'
 # full path, never "powershell.exe" alone: the elevated side must not depend on PATH
 $psExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 function Is-Admin { $id=[Security.Principal.WindowsIdentity]::GetCurrent(); (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
@@ -41,6 +45,36 @@ $taskName = 'guard'
 if (Test-InstallTestMode) {
     if ($env:GUARD_TASK) { $taskName = $env:GUARD_TASK }
     if (-not $Source -and $env:GUARD_SOURCE) { $Source = $env:GUARD_SOURCE }
+    if ($env:GUARD_RELEASE_KEY) { $releaseKey = $env:GUARD_RELEASE_KEY }
+    if ($env:GUARD_RELEASE_URL) { $releaseBase = $env:GUARD_RELEASE_URL.TrimEnd('/') }
+}
+function Get-Bytes([string]$Url) { $w = New-Object Net.WebClient; try { return $w.DownloadData($Url) } finally { $w.Dispose() } }
+function Get-Sha([byte[]]$b) { return -join ([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) }
+function Get-SignedRelease {
+    # the signed release list, or throws with the reason (same checks as Read-GuardRelease)
+    if (-not $releaseKey) { throw 'no signed guard release exists yet' }
+    try { $j = Get-Bytes "$releaseBase/main/release.json"; $s = Get-Bytes "$releaseBase/main/release.sig" }
+    catch { throw "can't reach GitHub" }
+    $ok = $false
+    try {
+        $p = New-Object Security.Cryptography.RSAParameters
+        $p.Modulus = [Convert]::FromBase64String($releaseKey); $p.Exponent = [byte[]](1, 0, 1)
+        $rsa = New-Object Security.Cryptography.RSACng; $rsa.ImportParameters($p)
+        $sig = [Convert]::FromBase64String(([Text.Encoding]::ASCII.GetString($s)).Trim())
+        $ok = ($p.Modulus.Length -ge 256) -and $rsa.VerifyData($j, $sig, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    } catch { $ok = $false }
+    if (-not $ok) { throw 'the release list on GitHub is not signed with the guard release key' }
+    $o = (New-Object Text.UTF8Encoding($false)).GetString($j) | ConvertFrom-Json
+    if ($o.name -ne 'guard' -or "$($o.commit)" -notmatch '^[0-9a-f]{40}$') { throw 'the release list is malformed' }
+    return $o
+}
+function Get-SignedFile($Rel, [string]$Path) {
+    # one file of the release, from ITS commit, only if its hash is the signed one
+    $want = [string]$Rel.files.$Path
+    if ($want -notmatch '^[0-9a-f]{64}$') { throw "the release list has no hash for $Path" }
+    try { $b = Get-Bytes "$releaseBase/$($Rel.commit)/$Path" } catch { throw "can't reach GitHub" }
+    if ((Get-Sha $b) -ne $want) { throw "$Path from GitHub doesn't match the signed release list" }
+    return $b
 }
 # progress bar on top, redrawn in place after every step (plain lines when output is redirected)
 $script:BarTop = -1; $script:BarWhat = 'installing'; $script:StepN = 0; $script:StepTotal = 9
@@ -267,7 +301,17 @@ if (-not $self) {
     $self = Join-Path $env:TEMP ('guard-install-' + [guid]::NewGuid().ToString('N') + '.ps1'); $tempSelf = $self
     $text = $null
     if ($Source) { $text = Get-Content (Join-Path (Split-Path $Source -Parent) 'install.ps1') -Raw -Encoding UTF8 }
-    else { $text = (Invoke-WebRequest "$repo/install.ps1" -UseBasicParsing).Content }
+    else {
+        # the installer that runs elevated is the SIGNED one, not this copy from main
+        try { $rel = Get-SignedRelease; $text = [Text.Encoding]::UTF8.GetString((Get-SignedFile $rel 'install.ps1')) }
+        catch {
+            Write-Host ""
+            Write-Host (" guard  not installed: " + $_.Exception.Message + ".") -ForegroundColor Red
+            Write-Host "        nothing was changed on this PC." -ForegroundColor Red
+            Write-Host ""
+            return
+        }
+    }
     [IO.File]::WriteAllText($self, $text.TrimStart([char]0xFEFF), (New-Object Text.UTF8Encoding($false)))
     if ((Is-Admin) -or $NoElevate) {
         $rest = @('-ForUser', $who, '-Prefix', $Prefix)
@@ -342,15 +386,26 @@ try {
 
 # 4 files (stop the old background guard first: it has these files open)
 try {
+    $bom = New-Object Text.UTF8Encoding($true)
+    $changed = 0
+    # every file is fetched and checked BEFORE anything is stopped or written: a bad one changes nothing
+    $got = @{}
+    if (-not $Source) {
+        try { $rel = Get-SignedRelease } catch { StepFail 'files' $_.Exception.Message; Fail-Out 'no trusted guard files' 'check the internet connection, then run the install line again'; return }
+    }
+    foreach ($fn in $runtime) {
+        # -Source: already checked files (update) or a local folder (tests)
+        if ($Source) { $got[$fn] = [IO.File]::ReadAllBytes((Join-Path $Source $fn)) }
+        else {
+            try { $got[$fn] = Get-SignedFile $rel "src/$fn" }
+            catch { StepFail 'files' $_.Exception.Message; Fail-Out 'the guard files on GitHub could not be trusted' 'nothing was changed. run the install line again later; if it stays, report it on GitHub'; return }
+        }
+    }
     $old = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -EA SilentlyContinue | Where-Object { $_.CommandLine -like "*$Prefix\guard-watch.ps1*" }
     try { Stop-ScheduledTask -TaskName $taskName -EA Stop } catch { }
     foreach ($p in $old) { try { Stop-Process -Id $p.ProcessId -Force -EA Stop } catch { } }
-    $bom = New-Object Text.UTF8Encoding($true)
-    $changed = 0
     foreach ($fn in $runtime) {
-        # (-Source reads the raw bytes so a BOM arrives exactly as in a download: tests hit the same path)
-        if ($Source) { $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $Source $fn))) }
-        else { $text = (Invoke-WebRequest "$repo/src/$fn" -UseBasicParsing).Content }
+        $text = [Text.Encoding]::UTF8.GetString($got[$fn])
         # a download keeps the file's BOM as a first character; WriteAllText adds one -> two BOMs,
         # and PowerShell then fails on the stray one. Strip it here.
         $text = $text.TrimStart([char]0xFEFF)

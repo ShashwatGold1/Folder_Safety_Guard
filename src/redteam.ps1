@@ -24,7 +24,9 @@ $work = Join-Path $repo ('testing_env\redteam-' + [guid]::NewGuid().ToString('N'
 New-Item -ItemType Directory $work -Force | Out-Null
 $psExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
-function Run-As([ValidateSet('Limited', 'Highest')][string]$Level, [string]$Code, [int]$Sec = 40) {
+function Run-As([ValidateSet('Limited', 'Highest')][string]$Level, [string]$Code, [int]$Sec = 90) {
+    # (90 s: right after the other suites the PC can be slow to start a task; a timeout would
+    #  look like a failed attack check, and never like a pass)
     # runs $Code in a new PowerShell as this user, as a scheduled task; returns what it logged
     $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $ps1 = Join-Path $work "task-$id.ps1"; $log = Join-Path $work "task-$id.log"
@@ -202,10 +204,12 @@ public static class Inj {
             "'terminal: ' + [Inj]::Type($hostPid, 'init $victim') | Add-Content `$log`n" +
             "'guard console: ' + [Inj]::Type($gpid, 'init $victim') | Add-Content `$log`n" +
             "'guard window: ' + [Inj]::Post($hwnd, 'init $victim') | Add-Content `$log`n" +
-            "Start-Sleep 1; 'guard console exit: ' + [Inj]::Type($gpid, 'exit') | Add-Content `$log") 60
+            "Start-Sleep 1; 'guard console exit: ' + [Inj]::Type($gpid, 'exit') | Add-Content `$log") 120
         Info ("attacker: " + ($r -join ' | '))
         Start-Sleep 6   # time for guard to act, if anything got through
+        Check 'the attacker ran every attempt (not timed out)' ((@($r | Where-Object { $_ -match '^guard ' }).Count -eq 3) -and ($r -contains 'DONE'))
         Check "typing into the user's terminal reaches nothing: guard doesn't read it" ((Test-Path "$victim\a.txt") -and -not (Test-Path "$victim\_guard.json") -and ((Get-Acl $victim).Owner -notmatch 'SYSTEM'))
+        Check "nothing was written into guard's console or posted to its window" (-not ($r -match '^guard [a-z ]+: (wrote|posted)'))
         Check "a program without admin can not attach to guard's own console" (@($r | Where-Object { $_ -match '^guard console( exit)?: attach refused' }).Count -eq 2)
         Check "a program without admin can not post key messages to guard's window" ($r -match '^guard window: post refused')
         Check 'guard still running: the typed exit never arrived' ($null -ne (Get-Process -Id $gpid -EA SilentlyContinue))
@@ -245,6 +249,21 @@ public static class Inj {
     $bad = @($hits | Where-Object { -not ($_.Filename -eq 'install.ps1' -and $_.Line -match "guard-install-") })
     foreach ($h in $bad) { Info ("{0}:{1}: {2}" -f $h.Filename, $h.LineNumber, $h.Line.Trim()) }
     Check 'only the allowed Temp use is left' ($bad.Count -eq 0)
+
+    # -----------------------------------------------------------------------------------------
+    Section 'a hacked GitHub (or an agent pushing to main) can not ship code'
+    # every download goes through the signed release list: no file is taken from main as is
+    $dl = @(Select-String -Path (Join-Path $src 'guard*.ps1'), (Join-Path $repo 'install.ps1') -Pattern 'Invoke-WebRequest|Invoke-RestMethod|\birm\b|DownloadString|DownloadFile|/main/(src|install)' |
+            Where-Object { $_.Line -notmatch '^\s*#' })
+    foreach ($h in $dl) { Info ("{0}:{1}: {2}" -f $h.Filename, $h.LineNumber, $h.Line.Trim()) }
+    Check 'no download outside the signed-release functions' ($dl.Count -eq 0)
+    $raw = @(Select-String -Path (Join-Path $src 'guard*.ps1'), (Join-Path $repo 'install.ps1') -Pattern 'DownloadData|Get-GuardBytes|Get-Bytes ' | Where-Object { $_.Line -notmatch '^\s*#' })
+    $where = @($raw | ForEach-Object { $_.Line } | Where-Object { $_ -notmatch 'function Get-(Guard)?Bytes|^\s*try \{ return \$w\.DownloadData\(\$Url\) \}|release\.(json|sig)|\$\(?\$?(Rel(ease)?|R)\.commit|\$SignCommit' })
+    foreach ($w in $where) { Info $w.Trim() }
+    Check 'every download is the signed list or a file of the signed commit' ($where.Count -eq 0)
+    . (Join-Path $src 'guard-sign.ps1') -Lib; $ErrorActionPreference = 'Continue'
+    $ck = Get-CodeKeys ([IO.File]::ReadAllText("$src\guard-core.ps1")) ([IO.File]::ReadAllText("$repo\install.ps1"))
+    Check 'the release key in install.ps1 and guard-core.ps1 is the same' ($ck[0] -ceq $ck[1])
 } finally {
     icacls $work /reset /T /C *> $null
     Remove-Item $work -Recurse -Force -EA SilentlyContinue

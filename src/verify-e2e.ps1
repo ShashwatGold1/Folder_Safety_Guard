@@ -61,10 +61,15 @@ $probe = Join-Path $env:TEMP 'guard-probe.ps1'
 'source=' + [string](Get-GuardTestEnv 'GUARD_SOURCE')
 'answers=' + [string](Get-GuardTestEnv 'GUARD_ANSWERS')
 'task=' + `$script:GuardTask
+'relkey=' + (Get-GuardReleaseKey)
+'relurl=' + (Get-GuardReleaseBase)
 "@ | Set-Content $probe -Encoding UTF8
 $env:GUARD_CONFIG = 'C:\evil\config.json'; $env:GUARD_SOURCE = 'C:\evil'; $env:GUARD_ANSWERS = 'YES'; $env:GUARD_TASK = 'evil'
+$env:GUARD_RELEASE_KEY = 'EVILKEY'; $env:GUARD_RELEASE_URL = 'file:///C:/evil'
 $o = powershell -NoProfile -ExecutionPolicy Bypass -File $probe 2>&1 | Out-String
-$env:GUARD_CONFIG = ''; $env:GUARD_SOURCE = ''; $env:GUARD_ANSWERS = ''; $env:GUARD_TASK = ''
+$env:GUARD_CONFIG = ''; $env:GUARD_SOURCE = ''; $env:GUARD_ANSWERS = ''; $env:GUARD_TASK = ''; $env:GUARD_RELEASE_KEY = ''; $env:GUARD_RELEASE_URL = ''
+Check 'GUARD_RELEASE_KEY ignored (an agent can not pick the release key)' ($o -notmatch 'EVILKEY')
+Check 'GUARD_RELEASE_URL ignored' ($o -match 'relurl=https://raw\.githubusercontent\.com/')
 Remove-Item $probe -Force
 Check 'GUARD_CONFIG ignored' ($o -match [regex]::Escape("config=$env:ProgramData\guard\config.json"))
 Check 'GUARD_SOURCE ignored' ($o -match 'source=\r?\n')
@@ -78,6 +83,36 @@ Section 'icacls errors come back as a result, never throw (review finding 9)'
 $threw = $false
 try { $ErrorActionPreference = 'Stop'; $x = Invoke-Icacls @('C:\definitely-not-here', '/deny', 'Everyone:(DE)') } catch { $threw = $true } finally { $ErrorActionPreference = 'Continue' }
 Check 'missing path: no exception, Ok = false' ((-not $threw) -and $x -and -not $x.Ok)
+
+Section 'signed releases: a test key and a fake GitHub (file://) for install and update'
+. "$src\guard-sign.ps1" -Lib; $ErrorActionPreference = 'Continue'
+$relRoot = Join-Path $env:TEMP ('guard-e2e-rel-' + [guid]::NewGuid().ToString('N'))
+$relRsa = New-Object Security.Cryptography.RSACng 2048
+$relSign = { param([byte[]]$d) $relRsa.SignData($d, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1) }
+$env:GUARD_RELEASE_KEY = [Convert]::ToBase64String($relRsa.ExportParameters($false).Modulus)
+function Repo-Files { $h = @{}; foreach ($f in Get-GuardReleaseFiles) { $h[$f] = [IO.File]::ReadAllBytes((Join-Path $repo $f)) }; return $h }
+function Publish([string]$Name, $Files, [string]$Ver, [string]$Commit) {
+    $d = Join-Path $relRoot $Name; New-GuardReleaseFolder $d $Commit $Files $Ver $relSign
+    $env:GUARD_RELEASE_URL = ([Uri]$d).AbsoluteUri; return $d
+}
+$c10 = ('10' * 20); [void](Publish 'v10' (Repo-Files) '1.0' $c10)
+Check 'signed 1.0 release is visible' ((Get-GuardRemoteVersion) -eq '1.0')
+
+Section 'the real TPM: a throwaway release key with a PIN (right PIN only: no lockout count)'
+$tk = 'guard-release-e2e-' + [guid]::NewGuid().ToString('N').Substring(0, 6); $tpin = 'e2e test pin ' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+try {
+    $tm = New-ReleaseKey $tk $tpin
+    $tj = [Text.Encoding]::UTF8.GetBytes('{"name":"guard"}')
+    $ts = Invoke-TpmSign $tk $tpin $tj
+    Check 'TPM key: made as a machine key, 2048 bit' ((Test-ReleaseKeyExists $tk) -and ([Convert]::FromBase64String($tm).Length -eq 256))
+    Check 'TPM key: its signature checks with its public half' (Test-GuardReleaseSig $tj $ts $tm)
+    Check 'TPM key: the public half read back is the same' ((Get-TpmReleaseModulus $tk) -eq $tm)
+    $k = [Security.Cryptography.CngKey]::Open($tk, (Get-SignProvider), (Get-SignOpenFlags)); $ex = $false
+    try { [void]$k.Export([Security.Cryptography.CngKeyBlobFormat]::GenericPrivateBlob); $ex = $true } catch { } finally { $k.Dispose() }
+    Check 'TPM key: the private half can not be copied out' (-not $ex)
+} catch { Check ('TPM key test ran: ' + $_.Exception.Message) $false }
+finally { try { Remove-ReleaseKey $tk } catch { } }
+Check 'TPM key: deleted again' (-not (Test-ReleaseKeyExists $tk))
 
 $rawBefore = Raw-Path
 
@@ -110,10 +145,11 @@ New-Item -ItemType Directory "$A\pics", "$A\old" -Force | Out-Null
 
 # ---------------------------------------------------------------------------
 Section 'install (real: Program Files + SYSTEM task)'
-$o = & "$repo\install.ps1" -Source $src -NoElevate 6>&1 | Out-String
+# no -Source: the files come from the signed (fake) release, hash-checked, like from GitHub
+$o = & "$repo\install.ps1" -NoElevate 6>&1 | Out-String
 Write-Host $o -ForegroundColor DarkGray
 Check 'Guard is Installed Successfully.' ($o -cmatch 'Guard is Installed Successfully\.')
-Check 'all 6 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
+Check 'all 7 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
 # (not $b: names ignore case, $b would overwrite $B, the Beta folder)
 $dbl = @(Get-ChildItem "$prefix\*.ps1" | Where-Object { $fb = [IO.File]::ReadAllBytes($_.FullName); -not ($fb[0] -eq 0xEF -and $fb[1] -eq 0xBB -and $fb[2] -eq 0xBF) -or ($fb[3] -eq 0xEF -and $fb[4] -eq 0xBB -and $fb[5] -eq 0xBF) })
@@ -347,13 +383,25 @@ Check 'list: shows files' ((Out-Of 'list') -match 'amazon-checkout.png')
 
 # ---------------------------------------------------------------------------
 Section 'update line + update to a newer version'
-$fake = Join-Path $env:TEMP ('guard-fake-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory "$fake\src" -Force | Out-Null
-foreach ($f in 'guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1') { Copy-Item "$src\$f" "$fake\src\$f" }
-Copy-Item "$repo\install.ps1" "$fake\install.ps1"
-$core = (Get-Content "$fake\src\guard-core.ps1" -Raw -Encoding UTF8) -replace "GuardVersion = '1\.0'", "GuardVersion = '1.1'"
-[IO.File]::WriteAllText("$fake\src\guard-core.ps1", $core, (New-Object Text.UTF8Encoding($true)))
-$env:GUARD_SOURCE = "$fake\src"
+function With-Version($Files, [string]$Ver, [string]$Extra = '') {
+    $h = @{}; foreach ($k in $Files.Keys) { $h[$k] = $Files[$k] }
+    $t = [Text.Encoding]::UTF8.GetString($h['src/guard-core.ps1']) -replace "GuardVersion = '1\.0'", "GuardVersion = '$Ver'"
+    $h['src/guard-core.ps1'] = [Text.Encoding]::UTF8.GetBytes($t + $Extra); return $h
+}
+# hacked GitHub first: a 1.1 whose file was changed after signing, then one signed with another key
+$d = Publish 'v11-tampered' (With-Version (Repo-Files) '1.1') '1.1' ('11' * 20)
+[IO.File]::AppendAllText((Join-Path $d (('11' * 20) + '\src\guard-watch.ps1')), "`n'evil' | Set-Content C:\guard-e2e-evil.txt")
+$o = Out-Of 'update'; Write-Host $o -ForegroundColor DarkGray
+Check "hacked GitHub: a changed file - update refused" ($o -match "update refused: src/guard-watch\.ps1 from GitHub doesn't match")
+Check 'hacked GitHub: nothing installed' ((Get-Content "$prefix\guard-core.ps1" -Raw) -match "GuardVersion = '1\.0'" -and -not (Test-Path 'C:\guard-e2e-evil.txt'))
+$evilRsa = New-Object Security.Cryptography.RSACng 2048
+$d = Join-Path $relRoot 'v11-evilkey'; New-GuardReleaseFolder $d ('12' * 20) (With-Version (Repo-Files) '1.1') '1.1' { param([byte[]]$x) $evilRsa.SignData($x, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1) }
+$env:GUARD_RELEASE_URL = ([Uri]$d).AbsoluteUri
+$o = Out-Of 'update'
+Check 'hacked GitHub: a list signed with another key - update refused' ($o -match 'update refused: the release list is not signed')
+Check 'no update line for an unsigned version' ($null -eq (Get-GuardRemoteVersion))
+Check 'staging is left empty' (@(Get-ChildItem "$prefix\staging" -Force -EA SilentlyContinue).Count -eq 0)
+$fake = Publish 'v11' (With-Version (Repo-Files) '1.1') '1.1' ('11' * 20)
 Check 'sees newer version 1.1' ((Get-GuardRemoteVersion) -eq '1.1')
 # pretend the background guard's 6-hourly check just saw 1.1 (it rewrites the file every 30 s, so retry)
 $seen = WaitFor {
@@ -370,8 +418,11 @@ Check 'background guard restarted (new process, still one)' (WaitFor { $ws = @(W
 Check 'folders untouched by update' ((IsLocked "$A\amazon-checkout.png") -and (IsLocked "$B2\invoice.pdf"))
 . "$prefix\guard-shell.ps1"; $ErrorActionPreference = 'Continue'; $script:User = Get-GuardUser; $script:Cfg = Load-GuardConfig
 Check 'already newest: says so' ((Out-Of 'update') -match 'newest version \(1\.1\)')
-$env:GUARD_SOURCE = ''
-Check 'GitHub unreachable/missing: update says so, no crash' (((Out-Of 'update') -match "can't reach GitHub|newest version"))
+[void](Publish 'v10-replay' (Repo-Files) '1.0' $c10)
+Check 'an old signed release is not taken (no downgrade)' ((Out-Of 'update') -match 'newest version \(1\.1\)')
+$env:GUARD_RELEASE_URL = ([Uri](Join-Path $relRoot 'nothing-here')).AbsoluteUri
+Check 'GitHub unreachable/missing: update says so, no crash' ((Out-Of 'update') -match "can't reach GitHub")
+$env:GUARD_RELEASE_URL = ([Uri](Join-Path $relRoot 'v11')).AbsoluteUri   # reinstall later: 1.1
 
 # ---------------------------------------------------------------------------
 Section 'uninstall'
@@ -394,12 +445,14 @@ Check '_guard.json kept as memory' ((Test-Path "$A\_guard.json") -and (Test-Path
 Section 'reinstall finds the memory and restores'
 $env:GUARD_ANSWERS = '1'
 # run it the way  irm | iex  does: text, no file behind it (installer must save itself + run apart)
-$o = & ([scriptblock]::Create($sbText)) -Source $src 6>&1 | Out-String
+#  (and no -Source: the signed installer and files, from the signed 1.1 release)
+$o = & ([scriptblock]::Create($sbText)) 6>&1 | Out-String
 $env:GUARD_ANSWERS = ''
 Check 'no-file run (iex style) worked' ($o -cmatch 'Guard is Installed Successfully\.')
 Check 'iex style left nothing behind in this session' (-not (Get-Command Bar-Start -EA SilentlyContinue))
 Write-Host $o -ForegroundColor DarkGray
 Check 'installer found the memory' ($o -match 'memory\s+found in')
+Check 'the signed 1.1 was installed' ((Get-Content "$prefix\guard-core.ps1" -Raw) -match "GuardVersion = '1\.1'")
 Check 'restore: 2 folders protected' ($o -cmatch '2 Folders are Protected Successfully\.')
 Check 'restored: locked + SYSTEM again' ((IsLocked "$A\amazon-checkout.png") -and (IsLocked "$B2\invoice.pdf") -and (OwnerOf $A) -match 'SYSTEM')
 Check 'config.json rebuilt with 2 folders' (@((Get-Content "$env:ProgramData\guard\config.json" -Raw | ConvertFrom-Json).folders).Count -eq 2)
@@ -421,7 +474,8 @@ Check 'test folders delete normally' ($canDel -and -not (Test-Path $root))
 Check 'testing_env has no deny left' (-not (IsLocked (Join-Path $repo 'testing_env')))
 Check 'no background guard left running' (@(Watchers).Count -eq 0)
 Check 'ProgramData\guard gone' (-not (Test-Path "$env:ProgramData\guard"))
-Remove-Item $fake -Recurse -Force -EA SilentlyContinue
+Remove-Item $relRoot -Recurse -Force -EA SilentlyContinue
+$env:GUARD_RELEASE_KEY = ''; $env:GUARD_RELEASE_URL = ''
 Check 'PATH exactly as before after the whole run' ((Raw-Path) -eq $rawBefore)
 Set-TestFlag $false
 Check 'test switch GUARD_TEST removed' (-not (Get-ItemProperty "HKLM:\$envKey" -Name GUARD_TEST -EA SilentlyContinue))
