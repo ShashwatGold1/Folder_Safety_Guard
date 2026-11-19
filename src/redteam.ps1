@@ -264,6 +264,71 @@ public static class Inj {
     . (Join-Path $src 'guard-sign.ps1') -Lib; $ErrorActionPreference = 'Continue'
     $ck = Get-CodeKeys ([IO.File]::ReadAllText("$src\guard-core.ps1")) ([IO.File]::ReadAllText("$repo\install.ps1"))
     Check 'the release key in install.ps1 and guard-core.ps1 is the same' ($ck[0] -ceq $ck[1])
+
+    # -----------------------------------------------------------------------------------------
+    Section 'the vault: a program without admin rights gets nothing, an administrator only scrambled bytes'
+    # the real TPM chip (right PIN only: no wrong-PIN count), a throwaway hidden account, real permissions
+    $envK = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    $hk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envK, $true); $hk.SetValue('GUARD_TEST', '1'); $hk.Close()
+    $vid = [guid]::NewGuid().ToString('N').Substring(0, 6)
+    $env:GUARD_VAULT_ROOT = Join-Path $work 'guard-vault'; $env:GUARD_VAULT_ACCOUNT = "gv-$vid"; $env:GUARD_VAULT_KEYNAME = "guard-vault-rt-$vid"
+    $env:GUARD_VAULT_CODE = '97531-97531-97531-97531-97531-97531'; $env:GUARD_NOBROWSER = '1'
+    $script:GuardConfigPath = Join-Path $work 'vdata\config.json'
+    try {
+        . "$src\guard-shell.ps1"; $ErrorActionPreference = 'Continue'
+        $user = $me.Name; $script:Cfg = New-GuardConfig   # ($script:User is $user: names ignore case)
+        function VQ { $script:InputQueue = New-Object System.Collections.Queue; foreach ($x in $args) { $script:InputQueue.Enqueue([string]$x) } }
+        $vs = Join-Path $work 'VaultMe'; New-Item -ItemType Directory $vs -Force | Out-Null
+        Set-Content "$vs\secret.txt" 'TOPSECRET-redteam'; $sh = Get-VaultFileHash "$vs\secret.txt"
+        $vpin = 'rt-pin-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        VQ $vpin $vpin $env:GUARD_VAULT_CODE
+        Check 'a folder goes into the vault (real chip, hidden account)' ((Invoke-GuardCommand "vault `"$vs`"" 6>&1 | Out-String -Width 400) -cmatch 'Folder is in the Vault\.')
+        $vst = Read-VaultState; $vv = @($vst.vaults)[0]; $gv = @(Get-VaultEntries $vv)[0].Gv; $vroot = $env:GUARD_VAULT_ROOT
+        # ($( ) around try / if: a statement can't be piped on its own)
+        $r = Run-As Limited ("`$(try { Get-ChildItem -LiteralPath '$vroot' -Recurse -EA Stop | Out-Null; 'list: allowed' } catch { 'list: denied' }) | Add-Content `$log`n" +
+            "`$(try { [void][IO.File]::ReadAllBytes('$gv'); 'read: allowed' } catch { 'read: denied' }) | Add-Content `$log`n" +
+            "`$(try { Copy-Item -LiteralPath '$gv' '$work\stolen.gv' -EA Stop; 'copy: allowed' } catch { 'copy: denied' }) | Add-Content `$log`n" +
+            "`$(try { Remove-Item -LiteralPath '$gv' -Force -EA Stop; 'delete: allowed' } catch { 'delete: denied' }) | Add-Content `$log`n" +
+            "& icacls '$vroot' /setowner '$user' *> `$null; `$(if (`$LASTEXITCODE) { 'owner: denied' } else { 'owner: allowed' }) | Add-Content `$log`n" +
+            "& icacls '$vroot' /grant '${user}:F' *> `$null; `$(if (`$LASTEXITCODE) { 'grant: denied' } else { 'grant: allowed' }) | Add-Content `$log")
+        Info ("attacker: " + ($r -join ' | '))
+        foreach ($w in 'list', 'read', 'copy', 'delete', 'owner', 'grant') { Check "without admin: $w the vault - refused" ($r -contains "${w}: denied") }
+        Check 'the locked file is still there' (Test-Path -LiteralPath $gv)
+        $r = Run-As Highest ("`$(try { `$b = [IO.File]::ReadAllBytes('$gv'); 'admin read: ' + `$b.Length + ' bytes, readable text: ' + ([Text.Encoding]::ASCII.GetString(`$b) -match 'TOPSECRET') } catch { 'admin read: denied' }) | Add-Content `$log")
+        Info ("administrator: " + ($r -join ' | '))
+        Check 'an administrator without the PIN gets only scrambled bytes' (($r -match 'readable text: False') -or ($r -contains 'admin read: denied'))
+        # a link planted where open will write: guard (admin) must not follow it
+        $target = Join-Path $work 'admin-only'; New-Item -ItemType Directory $target -Force | Out-Null
+        $r = Run-As Limited ("cmd /c mklink /J `"$vs`" `"$target`" | Out-Null; `$(if (Test-Path '$vs') { 'link: made' } else { 'link: refused' }) | Add-Content `$log")
+        if ($r -contains 'link: made') {
+            VQ $vpin; $o = Invoke-GuardCommand 'open secret' 6>&1 | Out-String -Width 400
+            Check 'a link planted at the folder: open refuses to write through it' (($o -match 'is a link') -and -not (Get-ChildItem $target -Force))
+            cmd /c rmdir "$vs" | Out-Null
+        } else { Info 'a program without admin rights could not even make the link'; Check 'a link planted at the folder: not possible' $true }
+        # an open copy swapped for a link to a Windows file: close must not read that file into the vault
+        VQ $vpin; Invoke-GuardCommand 'open secret' 6>&1 | Out-Null
+        Check 'open: secret.txt is back' (Test-Path "$vs\secret.txt")
+        $win = Join-Path (Get-GuardWindowsDir) 'win.ini'
+        $r = Run-As Limited ("Remove-Item -LiteralPath '$vs\secret.txt' -Force; `$(try { New-Item -ItemType HardLink -Path '$vs\secret.txt' -Target '$win' -EA Stop | Out-Null; 'hardlink: made' } catch { 'hardlink: refused' }) | Add-Content `$log")
+        Info ("attacker: " + ($r -join ' | '))
+        Invoke-GuardCommand 'close' 6>&1 | Out-Null
+        $k = Open-VaultKeys (Read-VaultState) $vpin
+        $now = Read-VaultFile (@(Get-VaultEntries $vv | Where-Object { $_.Rel -eq 'secret.txt' })[0].Gv) $null $k.Priv
+        Check 'close: a file that is not yours (a link to a Windows file) is never read into the vault' ($now -eq $sh)
+        if (Test-Path "$vs\secret.txt") { Remove-Item -LiteralPath "$vs\secret.txt" -Force -EA SilentlyContinue }
+        Check 'after close nothing readable is left at the folder' (-not (Test-Path "$vs\secret.txt"))
+        VQ 'YES' $vpin
+        Check 'unvault: back to a normal folder' ((Invoke-GuardCommand 'unvault VaultMe' 6>&1 | Out-String -Width 400) -cmatch 'Folder is out of the Vault\.')
+    } catch { Check ('vault attack section ran: ' + $_.Exception.Message) $false }
+    finally {
+        try { Remove-GuardVaultSystem | Out-Null } catch { }
+        Remove-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue
+        try { Remove-VaultChipKey $env:GUARD_VAULT_KEYNAME } catch { }
+        foreach ($n in 'GUARD_VAULT_ROOT', 'GUARD_VAULT_ACCOUNT', 'GUARD_VAULT_KEYNAME', 'GUARD_VAULT_CODE') { Set-Item "env:$n" '' }
+        $hk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envK, $true); $hk.DeleteValue('GUARD_TEST', $false); $hk.Close()
+        icacls (Join-Path $work 'guard-vault') /setowner $user /T /C *> $null; icacls (Join-Path $work 'guard-vault') /reset /T /C *> $null
+    }
+    Check 'vault test: account and chip key removed' (-not (Get-LocalUser -Name "gv-$vid" -EA SilentlyContinue))
 } finally {
     icacls $work /reset /T /C *> $null
     Remove-Item $work -Recurse -Force -EA SilentlyContinue

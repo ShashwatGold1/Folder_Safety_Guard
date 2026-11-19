@@ -10,6 +10,7 @@ param([string]$User, [switch]$Once)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$here\guard-core.ps1"
 . "$here\guard-config.ps1"
+. "$here\guard-vault.ps1"      # auto-close of open vault files (needs no PIN)
 
 if (-not $User) { $User = Get-GuardTestEnv 'GUARD_USER' }
 if (-not $User) { try { $User = Get-GuardUser } catch { } }
@@ -197,7 +198,14 @@ while ($true) { try {
     }
 
     $sinceBeat += $tick
-    if ($sinceBeat -ge 30) { $sinceBeat = 0; Write-WatchStatus 'alive' }
+    if ($sinceBeat -ge 30) {
+        $sinceBeat = 0
+        # vault files opened over 30 minutes ago, or before this sign-in: saved back and locked
+        $lt = Get-LogonTime; if (-not $lt) { $lt = [datetime]::MinValue }
+        try { if ((Invoke-GuardVaultAutoClose -User $User -Since $lt) -gt 0) { Write-WatchStatus 'vault closed' } }
+        catch { try { "{0:o}  vault auto-close: {1}`r`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace | Add-Content -LiteralPath $errorFile } catch { } }
+        Write-WatchStatus 'alive'
+    }
 
     # every 5 minutes: lock anything missed (a file still open earlier, a missed event)
     $sinceSweep += $tick

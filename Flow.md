@@ -993,3 +993,94 @@ guard  installing   [==============================]  100%   9/9
 - The 2 missing folders stay in the list and show `NOT FOUND` in red in the status block, with `next  type  use 3  then  remove  to forget it, or  init <new path>`.
 - `init` on a folder that already has a `_guard.json` asks the same restore question.
 - The newest `_guard.json` wins if copies disagree (e.g. one folder restored from an older backup).
+
+---
+
+## 17. check (PC settings guard can't protect by itself)
+
+```
+guard> check
+
+  PC check - settings guard can't protect by itself
+
+  fix   account     ojhas is an administrator                                    ← yellow
+                    programs you run (an AI agent too) can get admin rights through known tricks, with no prompt. ...   ← grey
+                    type  check account                                          ← cyan
+  ok    uac         asks on the dimmed screen, passwords asked there             ← green
+  fix   passwords   a password box can be faked
+  fix   clipboard   history is kept (Win+V)
+  fix   hibernate   on (also Fast Startup)
+  fix   pagefile    kept after shut down
+  ok    crash files small only
+  ok    defender    on, tamper protection on
+  fix   samples     suspicious files are sent to Microsoft by itself
+  ok    updates     last update 14 Nov 2026  (5 days ago)
+  ok    core        memory integrity on, sign-in protection on
+  info  startup     no startup PIN (your choice). someone with this PC alone for a while could change Windows
+                    and plant spyware. keep the PC where others can't get at it; guard vaults stay locked either way.
+
+  6 to fix.  check fix  fixes 5 of them.
+```
+
+- `check fix` lists what it will change and why, needs `YES`, changes each one, then reads every setting again: only what Windows now reports counts. Any setting that didn't change is a red `FAIL`, and then there is no green line. All of them can be turned back in Windows settings.
+- What `check fix` changes: clipboard history and cloud clipboard off, passwords only after Ctrl+Alt+Del, hibernation off (Fast Startup goes with it), the pagefile wiped at shut down, small crash files only, the admin prompt on the dimmed screen, and Defender never sends files without asking.
+- What it only shows, with the steps: Windows updates older than 45 days, Defender off, memory integrity or sign-in protection off.
+- `check account`, the most important one: makes a second account for admin work (you choose name and password, at least 12 characters, written on paper), checks with Windows that the password works, and only after `YES` makes your daily account a standard one. Any problem: nothing is taken away. From the next sign-in, `guard` (and anything else that needs admin) asks for that account's password.
+- Nothing about startup or booting (startup PIN, BIOS, USB boot): left out by choice (startup protection is never fully reliable either). What that leaves open: someone with the PC alone for a while could change Windows on C: and plant spyware that waits for you. Files in the vault stay unreadable without your PIN.
+
+---
+
+## 18. vault / open / close / unvault (nobody reads it without the PIN)
+
+```
+guard> vault C:\Users\ojhas\Documents\Passwords
+
+  Passwords  -  C:\Users\ojhas\Documents\Passwords  -  14 files  -  0.3 MB
+  after this only guard, with your PIN, can open it. the normal folder goes away.
+
+  first vault: choose the guard PIN. every  open  asks for it.
+  new PIN: ********
+  new PIN again: ********
+  account   guard-vault  -  hidden, switched off: owns the vault, nobody signs in with it   ok
+  chip      the vault key is locked in this PC's TPM chip with your PIN                      ok
+
+  recovery code. write it on paper now and keep it away from this PC:          <- yellow
+      40517-88213-09634-71250-36678-21945                                       <- cyan
+  type the recovery code from your paper: ********
+  recovery  code checked                                                         ok
+  locked    14 files  -  encrypted, checked one by one                            ok
+  vault     C:\guard-vault\3f9c...  -  owned by guard-vault  -  only administrators and SYSTEM may touch it   ok
+  removed   the normal folder (its files are only in the vault now)              ok
+
+  Folder is in the Vault.                                                        <- green
+```
+
+```
+guard> open bank
+  PIN  (forgot it, or a new PC: type  recovery): ********
+  opened    1 file(s)  -  normal files again, only these                         ok
+  here      C:\Users\ojhas\Documents\Passwords\bank.txt                          <- cyan
+  everything else stays locked. type  close  when done; closes by itself after 30 minutes or at the next restart.
+
+guard> close
+  closed    C:\Users\ojhas\Documents\Passwords\bank.txt  -  1 changed saved     ok
+  Vault is Locked Again.                                                         <- green
+```
+
+- What holds it shut, from the inside out:
+  - every file is encrypted (AES-256, checked with HMAC-SHA256) with a key of its own
+  - those keys are locked with the vault's data key; the data key with the vault key
+  - the vault key is locked by a key inside this PC's TPM chip that only works with the PIN. The chip counts wrong PINs (32, then one more try every 2 hours). A second copy is locked with the recovery code
+- Where the files are: `<drive>:\guard-vault`, owned by the switched-off `guard-vault` account. Only that account, SYSTEM and administrators are in its permissions. You, Explorer and every program running as you (AI agents too) get "access denied" even to list it. An administrator can take the files, but they are scrambled.
+- `open <name>`: a vault folder's name opens all of it, part of a file name opens those files (a list to pick from when several match). Only what you picked comes back, as normal files at the folder's old place; everything else stays locked. A wrong PIN opens nothing.
+- `close` needs no PIN: it saves changes back, adds files you made there, and takes the open copies away (overwritten with zeros, then deleted). A file deleted while open stays in the vault. A file still open in a program stays open, and closes later.
+- The background guard closes everything opened more than 30 minutes ago, and everything still open at the next sign-in, the same way.
+- At the PIN question, `recovery` asks for the recovery code instead: a new PC, Windows reinstalled, the chip cleared, or the PIN forgotten. `vault pin` changes the PIN.
+- `unvault <name>` (YES + PIN) puts the whole folder back as a normal folder you own. `uninstall` refuses while a folder is in the vault, because without guard it would stay locked for good.
+- Refused: a drive, Windows and program folders, OneDrive/Google Drive/Dropbox folders (an open file would be uploaded), a folder holding links, a folder inside or around another vault or protected folder. A folder protected with `init` loses that protection; the vault replaces it.
+- guard writes open files only along paths with no links, and on close reads back only real files owned by you. A link planted by another program is refused, never followed.
+- Stays possible, honestly:
+  - while a file is open, programs you run can read that file. Don't open vault files with an AI agent running.
+  - an attacker with administrator rights who is already on the PC when you type the PIN could catch it (`check account` closes most of this).
+  - file names inside the vault folder can be seen by administrators, never their contents.
+  - without the PIN and without the recovery code, the files are gone for good.

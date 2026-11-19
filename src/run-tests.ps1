@@ -22,7 +22,7 @@ function Reset {
 
 if ($admin) { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key, $true); $k.SetValue('GUARD_TEST', '1'); $k.Close() }
 try {
-    foreach ($t in 'test-core.ps1','test-config.ps1','test-shell.ps1','test-watch.ps1','test-release.ps1') {
+    foreach ($t in 'test-core.ps1','test-config.ps1','test-shell.ps1','test-watch.ps1','test-release.ps1','test-check.ps1','test-vault.ps1') {
         Reset
         Write-Host "`n######## $t ########" -ForegroundColor Magenta
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $src $t) 2>&1 | Where-Object { "$_" -match 'PASS|FAIL|passed' } | ForEach-Object { "$_" }

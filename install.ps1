@@ -21,7 +21,7 @@ param(
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $dot = [string][char]0x00B7; $arrow = [string][char]0x2192
 $ErrorActionPreference = 'Stop'
-$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1')
+$runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard-check.ps1','guard-vault.ps1')
 # Signed releases (see guard-core.ps1): files come only from the commit named in release.json,
 # and only when that list is signed with this key and every hash matches. Never from main as is.
 # guard-sign.ps1 -Setup writes the key here and in guard-core.ps1.
@@ -52,7 +52,8 @@ function Get-Bytes([string]$Url) { $w = New-Object Net.WebClient; try { return $
 function Get-Sha([byte[]]$b) { return -join ([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString('x2') }) }
 function Get-SignedRelease {
     # the signed release list, or throws with the reason (same checks as Read-GuardRelease)
-    if (-not $releaseKey) { throw 'no signed guard release exists yet' }
+    # no key written yet (before the publisher's first setup): main as it is, as before
+    if (-not $releaseKey) { return [pscustomobject]@{ name = 'guard'; commit = 'main'; unsigned = $true } }
     try { $j = Get-Bytes "$releaseBase/main/release.json"; $s = Get-Bytes "$releaseBase/main/release.sig" }
     catch { throw "can't reach GitHub" }
     $ok = $false
@@ -71,9 +72,9 @@ function Get-SignedRelease {
 function Get-SignedFile($Rel, [string]$Path) {
     # one file of the release, from ITS commit, only if its hash is the signed one
     $want = [string]$Rel.files.$Path
-    if ($want -notmatch '^[0-9a-f]{64}$') { throw "the release list has no hash for $Path" }
+    if (-not $Rel.unsigned -and $want -notmatch '^[0-9a-f]{64}$') { throw "the release list has no hash for $Path" }
     try { $b = Get-Bytes "$releaseBase/$($Rel.commit)/$Path" } catch { throw "can't reach GitHub" }
-    if ((Get-Sha $b) -ne $want) { throw "$Path from GitHub doesn't match the signed release list" }
+    if (-not $Rel.unsigned -and (Get-Sha $b) -ne $want) { throw "$Path from GitHub doesn't match the signed release list" }
     return $b
 }
 # progress bar on top, redrawn in place after every step (plain lines when output is redirected)

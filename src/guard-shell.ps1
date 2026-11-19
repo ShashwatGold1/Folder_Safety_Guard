@@ -3,6 +3,8 @@
 
 . "$PSScriptRoot\guard-core.ps1"
 . "$PSScriptRoot\guard-config.ps1"
+. "$PSScriptRoot\guard-check.ps1"
+. "$PSScriptRoot\guard-vault.ps1"
 
 $script:Cfg  = $null
 $script:User = $null
@@ -690,6 +692,7 @@ function Show-Status([switch]$All) {
     }
     Say $line
     Say ""
+    Show-VaultLine
     Show-NextLines $w
 }
 
@@ -703,6 +706,11 @@ use <n>                   switch to folder n
 init                      protect the folder the terminal is in
 init <path>               protect the folder at path
 update                    install the newest guard
+check                     check this PC's safety settings
+vault <path>              put a folder in the vault: PIN to open
+open <name>               open a vault file or folder (PIN)
+close                     lock what is open again
+unvault <name>            take a folder out of the vault
 cls                       clear screen
 help <command>            explain a command
 help all                  explain every command
@@ -1306,6 +1314,11 @@ $script:HelpShort = [ordered]@{
     'use'='make folder number n the current one · numbers come from folders'
     'init'='protect the folder the terminal is in, or the one at path · locks folder, folder above, every file'
     'update'='install the newest guard from GitHub · protected folders untouched'
+    'check'="check this PC's safety settings · check fix = fix what guard can · check account = stop using an admin account every day"
+    'vault'='put a folder in the vault: nobody can read it without your PIN · vault = list · vault pin = change the PIN'
+    'open'='PIN, then only that vault file or folder becomes a normal one again for a while'
+    'close'='save changes back into the vault and lock what is open · close <name> = only that'
+    'unvault'='take a folder out of the vault for good: a normal folder again · unvault all = every one'
     'cls'="clear the screen and show the command table and every folder's status again"
     'help'='help <command> explains one command · help all explains every command'
     'uninstall'='remove guard from this PC · unlocks everything, removes the background guard · files stay on the disk'
@@ -1372,6 +1385,39 @@ Checks GitHub for a newer guard. If there is one, installs it in place: the
 program files and the background guard are replaced, protected folders and
 their locks are not touched. guard closes after the update; type  guard  again.
 '@
+    'check'=@'
+Shows the Windows settings guard can't protect by itself: ok, or what to fix
+and why. check fix  changes every one guard can (clipboard history, password
+box after Ctrl+Alt+Del, hibernate, pagefile, crash files, admin prompt,
+Defender samples) after you type YES. check account  makes a second account
+for admin work and then makes your daily account a standard one, so programs
+you run can't get admin rights. Nothing about startup or booting.
+'@
+    'vault'=@'
+vault <path>  moves a folder into the vault. Every file is encrypted and kept in
+<drive>:\guard-vault, owned by a hidden account nobody signs in with; you, Explorer
+and every program (AI agents too) get "access denied", and an administrator who
+takes the files gets scrambled bytes. The normal folder goes away. The first time,
+you choose the guard PIN (kept by this PC's TPM chip, which counts wrong tries) and
+get a recovery code for paper. vault  lists the vault. vault pin  changes the PIN.
+'@
+    'open'=@'
+open <name>  asks for the PIN, then puts back only what you picked, as normal
+files at the folder's old place: a whole vault folder (its name) or files (part of
+a name). Everything else stays locked. While open, programs you run can read those
+files. close  locks them again; they also close by themselves after 30 minutes and
+at the next restart. At the PIN question,  recovery  uses the recovery code.
+'@
+    'close'=@'
+Saves every change back into the vault (no PIN needed), adds new files you made
+there, and takes the open copies away. A file deleted while open stays in the
+vault. A file still in use by a program stays open: close the program, then
+close  again, or the background guard closes it a little later.
+'@
+    'unvault'=@'
+unvault <name>  needs YES and the PIN, then puts the whole folder back as a normal
+folder you own and removes it from the vault. unvault all  does every one.
+'@
     'uninstall'=@'
 Removes guard from this PC after you type  YES. Every folder is unlocked and
 given back to you, the background guard and its task are removed, the guard
@@ -1389,7 +1435,12 @@ function Show-HelpTable {
   init                    protect the folder the terminal is in · no question asked · locks folder, folder above, every file
   init <path>             same, for the folder at path
   update                  install the newest guard from GitHub · protected folders untouched
-  cls                     clear the screen and show the command table and every folder's status again
+  check                   check this PC's safety settings · check fix · check account
+  vault <path>            put a folder in the vault · nobody can read it without your PIN · vault pin = change it
+  open <name>             PIN, then only that vault file or folder is a normal one for a while
+  close                   save changes back and lock what is open · closes by itself after 30 minutes
+  unvault <name>          take a folder out of the vault for good
+  cls                 clear the screen and show the command table and every folder's status again
   help <command>          longer explanation of one command
   help all                longer explanation of every command
   uninstall               remove guard from this PC · unlocks everything, removes the background guard · files stay on the disk
@@ -1509,6 +1560,7 @@ function Cmd-Update {
         return $true
     }
     $v = [string]$r.Release.version
+    if ($r.Release.unsigned) { Say "  note: this guard has no release key yet, so updates are not signature-checked (as before)." 'Yellow' }
     if (-not (Test-GuardNewer $v)) { Say ("  you have the newest version ({0})" -f $script:GuardVersion); return $true }
     # not the Temp folder: any program can swap a file there before the elevated guard runs it.
     # staging\ is inside the program folder, where only administrators can write. Every file is
@@ -1529,6 +1581,8 @@ function Cmd-Update {
 }
 
 function Cmd-Uninstall {
+    # vault folders open only through guard: without it they would stay locked for good
+    if (Test-GuardVaultInUse) { Say "  guard has folders in the vault. type  unvault all  first, then  uninstall." 'Red'; return $true }
     $folders = @($script:Cfg.folders)
     $n = 0; foreach ($f in $folders) { if (Test-Path -LiteralPath $f.path) { $n += @(Get-GuardFiles -Folder $f.path).Count } }
     Say ""; Say ("  This removes guard from this PC. Protected folders: {0}, files: {1}. Nothing is deleted." -f $folders.Count, $n)
@@ -1549,7 +1603,8 @@ function Cmd-Uninstall {
         Ok "unlocked" ("{0}  ({1} files)  owner back to you" -f $f.path, $c)
     }
     if ($folders.Count) { Ok "kept" "_guard.json in every folder (memory, so a future install can restore)" }
-    # 3 task, path, program, data
+    # 3 task, path, program, data (and the vault's chip key and account, when no vault is left)
+    Remove-GuardVaultSystem | Out-Null
     try { Unregister-ScheduledTask -TaskName $script:GuardTask -Confirm:$false -ErrorAction Stop; Ok "removed" ("task `"{0}`"" -f $script:GuardTask) } catch { Ok "removed" "task (was not there)" }
     try {
         # raw registry value: keeps %SystemRoot% etc. as they are (REG_EXPAND_SZ)
@@ -1633,6 +1688,11 @@ function Invoke-GuardCommand([string]$raw) {
         'use'     { Cmd-Use $arg }
         'cls'       { Clear-Host; Show-Table; $script:ShowAll = $true }
         'help'      { Show-Help $arg }
+        'check'     { Cmd-Check $arg }
+        'vault'     { Cmd-Vault $arg }
+        'open'      { Cmd-Open $arg }
+        'close'     { Cmd-Close $arg }
+        'unvault'   { Cmd-Unvault $arg }
         'update'    { return (Cmd-Update) }
         'uninstall' { return (Cmd-Uninstall) }
         'exit'      { return $false }

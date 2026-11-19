@@ -49,9 +49,13 @@ try {
     Write-Host "`n== no key, offline ==" -ForegroundColor Cyan
     $d = Use-Release 'good'
     $env:GUARD_RELEASE_KEY = ''
+    $lg = Use-Release 'legacy'; New-Item -ItemType Directory "$lg\main\src" -Force | Out-Null
+    [IO.File]::WriteAllText("$lg\main\src\guard-core.ps1", "`$script:GuardVersion = '7.7'")
     $r = Get-GuardRelease
-    Check 'guard without a release key takes nothing' (-not $r.Ok -and $r.Why -match 'no release key')
+    Check 'no release key yet: main as it is, marked unsigned' ($r.Ok -and $r.Release.unsigned -and $r.Release.version -eq '7.7' -and $r.Release.commit -eq 'main')
     $env:GUARD_RELEASE_KEY = $key
+    $d = Use-Release 'good'
+    Check 'with a key: the same main without a signed list is refused' (-not (Get-GuardRelease).Release.unsigned)
     $env:GUARD_RELEASE_URL = ([Uri](Join-Path $tmp 'nothing-here')).AbsoluteUri
     $r = Get-GuardRelease
     Check 'offline: says so' (-not $r.Ok -and $r.Offline)

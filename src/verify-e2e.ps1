@@ -149,7 +149,7 @@ Section 'install (real: Program Files + SYSTEM task)'
 $o = & "$repo\install.ps1" -NoElevate 6>&1 | Out-String
 Write-Host $o -ForegroundColor DarkGray
 Check 'Guard is Installed Successfully.' ($o -cmatch 'Guard is Installed Successfully\.')
-Check 'all 7 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
+Check 'all 9 modules + guard.cmd in Program Files' ((@('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard-check.ps1','guard-vault.ps1','guard.cmd') | Where-Object { -not (Test-Path "$prefix\$_") }).Count -eq 0)
 Check 'no test files installed' (-not (Test-Path "$prefix\test-core.ps1") -and -not (Test-Path "$prefix\attack-limited.ps1"))
 # (not $b: names ignore case, $b would overwrite $B, the Beta folder)
 $dbl = @(Get-ChildItem "$prefix\*.ps1" | Where-Object { $fb = [IO.File]::ReadAllBytes($_.FullName); -not ($fb[0] -eq 0xEF -and $fb[1] -eq 0xBB -and $fb[2] -eq 0xBF) -or ($fb[3] -eq 0xEF -and $fb[4] -eq 0xBB -and $fb[5] -eq 0xBF) })
@@ -423,6 +423,85 @@ Check 'an old signed release is not taken (no downgrade)' ((Out-Of 'update') -ma
 $env:GUARD_RELEASE_URL = ([Uri](Join-Path $relRoot 'nothing-here')).AbsoluteUri
 Check 'GitHub unreachable/missing: update says so, no crash' ((Out-Of 'update') -match "can't reach GitHub")
 $env:GUARD_RELEASE_URL = ([Uri](Join-Path $relRoot 'v11')).AbsoluteUri   # reinstall later: 1.1
+
+# ---------------------------------------------------------------------------
+Section 'vault: the real TPM chip, a hidden owner account, the background guard closes by itself'
+$vid = [guid]::NewGuid().ToString('N').Substring(0, 6)
+$env:GUARD_VAULT_ROOT = Join-Path $root 'guard-vault'; $env:GUARD_VAULT_ACCOUNT = "gv-$vid"; $env:GUARD_VAULT_KEYNAME = "guard-vault-e2e-$vid"
+$env:GUARD_VAULT_CODE = '24680-13579-24680-13579-24680-13579'
+$vs = Join-Path $root 'Vaulted'; New-Item -ItemType Directory "$vs\inner" -Force | Out-Null
+Set-Content "$vs\tax.txt" 'TOPSECRET-e2e-tax'; Set-Content "$vs\inner\bank.txt" 'TOPSECRET-e2e-bank'
+$taxHash = (Get-FileHash "$vs\tax.txt" -Algorithm SHA256).Hash
+$vpin = 'e2e-pin-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+try {
+    Q $vpin $vpin $env:GUARD_VAULT_CODE; $o = Out-Of "vault `"$vs`""; Write-Host $o -ForegroundColor DarkGray
+    Check 'vault: Folder is in the Vault.' ($o -cmatch 'Folder is in the Vault\.')
+    Check 'vault: the normal folder is gone' (-not (Test-Path $vs))
+    $vst = Read-VaultState; $vv = @($vst.vaults)[0]; $ents = @(Get-VaultEntries $vv)
+    Check 'vault: the chip key is a real TPM machine key' ([Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)))
+    $acc = Get-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue
+    Check 'vault: the hidden owner account exists and is switched off' ($acc -and -not $acc.Enabled)
+    Check 'vault: every locked file is owned by that account' (@($ents | Where-Object { (Get-Acl $_.Gv).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $vst.ownerSid }).Count -eq 0 -and $ents.Count -eq 2)
+    $aces = @((Get-Acl (Get-VaultDir $vv)).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Select-Object -Unique)
+    Check 'vault: only SYSTEM, administrators and the owner account in its permissions' (@($aces | Where-Object { @('S-1-5-18', 'S-1-5-32-544', $vst.ownerSid) -notcontains $_ }).Count -eq 0)
+    Check 'vault: no readable text in the locked files' (-not ($ents | Where-Object { [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.Gv)) -match 'TOPSECRET' }))
+    Check 'uninstall refused while a folder is in the vault' (((Out-Of 'uninstall') -match 'unvault all  first') -and (Test-Path $prefix))
+    Q $vpin; $o = Out-Of 'open tax'
+    Check 'open: only tax.txt is back, with the same bytes' ((Test-Path "$vs\tax.txt") -and -not (Test-Path "$vs\inner\bank.txt") -and (Get-FileHash "$vs\tax.txt" -Algorithm SHA256).Hash -eq $taxHash)
+    Check 'open: the open copy is yours' ((OwnerOf "$vs\tax.txt") -match 'ojhas')
+    Update-VaultState { param($st) foreach ($i in $st.open) { $i.at = (Get-Date).AddMinutes(-40).ToString('o') } }
+    $ac = WaitFor { -not (Test-Path "$vs\tax.txt") -and -not @((Read-VaultState).open).Count } 90
+    Check 'the background guard (SYSTEM) closes it after 30 minutes' $ac
+    if (-not $ac) {
+        Write-Host ("      plain still there: {0}  open items: {1}" -f (Test-Path "$vs\tax.txt"), @((Read-VaultState).open).Count) -ForegroundColor DarkGray
+        Write-Host ("      watcher status: " + (Get-Content "$env:ProgramData\guard\watch-status.json" -Raw -EA SilentlyContinue)) -ForegroundColor DarkGray
+        Get-Content "$env:ProgramData\guard\watch-error.log" -Tail 12 -EA SilentlyContinue | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        Update-VaultState { param($st) $st.open = @() }; Remove-Item "$vs\tax.txt" -Force -EA SilentlyContinue   # so the rest of the test can go on
+    }
+    Check 'still 2 files in the vault after the auto-close' (@(Get-VaultEntries $vv).Count -eq 2)
+    Q 'YES' $vpin; $o = Out-Of 'unvault Vaulted'
+    Check 'unvault: Folder is out of the Vault.' ($o -cmatch 'Folder is out of the Vault\.')
+    Check 'unvault: every file back, yours' ((Get-Content "$vs\inner\bank.txt" -Raw) -match 'TOPSECRET-e2e-bank' -and (OwnerOf "$vs\tax.txt") -match 'ojhas')
+} finally {
+    if (-not (Test-GuardVaultInUse)) { Remove-GuardVaultSystem | Out-Null }
+    Remove-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue
+    Remove-VaultChipKey $env:GUARD_VAULT_KEYNAME
+}
+Check 'vault: chip key and owner account removed again' (-not [Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)) -and -not (Get-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue))
+foreach ($n in 'GUARD_VAULT_ROOT', 'GUARD_VAULT_ACCOUNT', 'GUARD_VAULT_KEYNAME', 'GUARD_VAULT_CODE') { Set-Item "env:$n" '' }
+Remove-Item -LiteralPath $vs -Recurse -Force -EA SilentlyContinue
+
+# ---------------------------------------------------------------------------
+Section 'check account: an admin account first, then the daily one becomes standard (throwaway test accounts)'
+$tid = [guid]::NewGuid().ToString('N').Substring(0, 6); $daily = "gd-$tid"; $adm = "ga-$tid"
+$apw = 'Admin-pw-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+$keepUser = $script:User
+try {
+    New-LocalUser -Name $daily -Password (ConvertTo-SecureString ('Daily-' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force) -ErrorAction Stop | Out-Null
+    Add-LocalGroupMember -SID 'S-1-5-32-544' -Member $daily
+    $script:User = "$env:COMPUTERNAME\$daily"
+    Check 'check: an admin daily account is to fix' ((Out-Of 'check') -match 'fix\s+account')
+    Q $adm $apw 'Another-password-123'; $o = Out-Of 'check account'
+    Check 'passwords differ: nothing made' (($o -match 'differ') -and -not (Get-LocalUser -Name $adm -EA SilentlyContinue))
+    Q $adm 'short' 'short'
+    Check 'short password refused' ((Out-Of 'check account') -match 'shorter than 12')
+    Q $adm $apw $apw 'no'; $o = Out-Of 'check account'
+    Check 'admin account made, and Windows accepts its password' (($o -match "works for $adm") -and (Test-CheckIsAdmin "$env:COMPUTERNAME\$adm"))
+    Check 'no at the last step: the daily account stays an admin' (Test-CheckIsAdmin $script:User)
+    Q $adm 'Wrong-password-000' 'Wrong-password-000'
+    Check 'existing admin account + wrong password: refused, nothing taken away' (((Out-Of 'check account') -match 'not its password') -and (Test-CheckIsAdmin $script:User))
+    Q $adm $apw $apw 'YES'; $o = Out-Of 'check account'
+    Check 'Account is Changed Successfully.' ($o -cmatch 'Account is Changed Successfully\.')
+    Check 'the daily account is a standard account now' (-not (Test-CheckIsAdmin $script:User))
+    Check 'the admin account is still an administrator' (Test-CheckIsAdmin "$env:COMPUTERNAME\$adm")
+    Check 'check: account ok now' ((Out-Of 'check') -match 'ok\s+account')
+    Check 'check account again: nothing to do' ((Out-Of 'check account') -match 'already a standard account')
+} finally {
+    $script:User = $keepUser
+    foreach ($n in $daily, $adm) { Remove-LocalUser -Name $n -EA SilentlyContinue }
+}
+Check 'test accounts removed' (-not (Get-LocalUser -Name $daily -EA SilentlyContinue) -and -not (Get-LocalUser -Name $adm -EA SilentlyContinue))
+Check 'your own account untouched (still an administrator)' (Test-CheckIsAdmin $keepUser)
 
 # ---------------------------------------------------------------------------
 Section 'uninstall'

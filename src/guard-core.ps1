@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 
 $script:GuardVersion = '1.0'
-$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1')
+$script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard-check.ps1','guard-vault.ps1')
 $script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
 # ---- paths a program without admin rights can't redirect --------------------------------
@@ -164,6 +164,15 @@ function Read-GuardRelease([byte[]]$Json, [byte[]]$Sig, [string]$Key) {
 function Get-GuardRelease {
     # @{ Ok; Release; Why; Offline }: the newest signed release list from GitHub
     $base = Get-GuardReleaseBase
+    if (-not (Get-GuardReleaseKey)) {
+        # no release key written in this guard yet (before the publisher's first  guard-sign.ps1 -Setup):
+        # main as it is, as before signed releases, and marked unsigned. A guard that has a key never comes here.
+        $rel = [pscustomobject]@{ name = 'guard'; commit = 'main'; version = $null; files = $null; unsigned = $true }
+        try { $t = (New-Object Text.UTF8Encoding($false)).GetString((Get-GuardBytes "$base/$($rel.commit)/src/guard-core.ps1")) }
+        catch { return @{ Ok = $false; Offline = $true; Why = "can't reach GitHub" } }
+        if ($t -match "GuardVersion\s*=\s*'([\d\.]+)'") { $rel.version = $Matches[1]; return @{ Ok = $true; Release = $rel } }
+        return @{ Ok = $false; Offline = $false; Why = 'no version found on GitHub' }
+    }
     try { $j = Get-GuardBytes "$base/main/release.json"; $s = Get-GuardBytes "$base/main/release.sig" }
     catch { return @{ Ok = $false; Offline = $true; Why = "can't reach GitHub" } }
     try {
@@ -177,7 +186,7 @@ function Save-GuardReleaseFiles($Release, [string]$Dir) {
     $base = Get-GuardReleaseBase
     foreach ($f in Get-GuardReleaseFiles) {
         $b = Get-GuardBytes "$base/$($Release.commit)/$f"
-        if ((Get-GuardSha256 $b) -ne $Release.files.$f) { throw "$f from GitHub doesn't match the signed release list" }
+        if (-not $Release.unsigned -and (Get-GuardSha256 $b) -ne $Release.files.$f) { throw "$f from GitHub doesn't match the signed release list" }
         [IO.File]::WriteAllBytes((Join-Path $Dir (Split-Path $f -Leaf)), $b)
     }
 }
