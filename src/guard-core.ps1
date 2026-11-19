@@ -8,6 +8,37 @@ $script:GuardRepo    = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_S
 $script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
 $script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
+# ---- paths a program without admin rights can't redirect --------------------------------
+# guard never takes a folder path from an environment variable: in an administrator account's
+# normal session any program can set them (setx, HKCU\Environment), and the elevated guard
+# would inherit the fake values (fake config folder, fake Windows folder for icacls...). These
+# come from the kernel (GetSystemDirectory) and from HKLM, which only administrators can change.
+function Get-GuardSystemDir { return [Environment]::SystemDirectory }                        # C:\Windows\System32
+function Get-GuardWindowsDir { return (Split-Path ([Environment]::SystemDirectory) -Parent) } # C:\Windows
+function Get-GuardMachineValue([string]$Key, [string]$Name) {
+    # raw HKLM value from the 64-bit view, %SystemDrive% / %SystemRoot% filled in by hand
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $k = $base.OpenSubKey($Key)
+        if (-not $k) { return $null }
+        try { $v = [string]$k.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } finally { $k.Close() }
+    } finally { $base.Close() }
+    if (-not $v) { return $null }
+    $v = $v -ireplace '%SystemDrive%', (Get-GuardWindowsDir).Substring(0, 2)
+    return ($v -ireplace '%SystemRoot%', (Get-GuardWindowsDir))
+}
+function Get-GuardProgramFiles { return (Get-GuardMachineValue 'SOFTWARE\Microsoft\Windows\CurrentVersion' 'ProgramFilesDir') }
+function Get-GuardProgramFilesX86 { return (Get-GuardMachineValue 'SOFTWARE\Microsoft\Windows\CurrentVersion' 'ProgramFilesDir (x86)') }
+function Get-GuardProgramData { return (Get-GuardMachineValue 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' 'ProgramData') }
+function Get-GuardPowerShellExe { return (Join-Path (Get-GuardSystemDir) 'WindowsPowerShell\v1.0\powershell.exe') }
+function Get-GuardTool([string]$Exe) { return (Join-Path (Get-GuardSystemDir) $Exe) }        # icacls.exe, cmd.exe ...
+function Set-GuardSafeModulePath {
+    # load PowerShell modules only from folders only administrators can change: otherwise a
+    # module planted in Documents\WindowsPowerShell\Modules (ScheduledTasks, Storage, ...)
+    # would run inside the elevated guard
+    $env:PSModulePath = ((Join-Path $PSHOME 'Modules'), (Join-Path (Get-GuardProgramFiles) 'WindowsPowerShell\Modules')) -join ';'
+}
+
 function Test-GuardTestMode {
     # Test overrides (GUARD_CONFIG, GUARD_SOURCE, GUARD_TASK, GUARD_ANSWERS, GUARD_USER) are read
     # from the environment ONLY when that can't help an attacker:
@@ -29,6 +60,8 @@ function Get-GuardTestEnv([string]$Name) {
 }
 
 $script:GuardTask = 'guard'; $t = Get-GuardTestEnv 'GUARD_TASK'; if ($t) { $script:GuardTask = $t }
+# elevated (or SYSTEM): from here on, modules load only from admin-only folders
+if ((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Set-GuardSafeModulePath }
 
 # ---- machine PATH: read and write the raw value, so %SystemRoot% and friends survive ----------
 function Get-GuardMachinePath {
@@ -67,7 +100,7 @@ function Remove-GuardMachinePath([string]$Dir) {
 }
 # A one-line guard.cmd in C:\Windows too: that folder is on the PATH of every terminal, also ones
 # opened before the install, whose PATH can't be refreshed. Only admins can write there.
-function Get-GuardShimPath { return (Join-Path $env:SystemRoot 'guard.cmd') }
+function Get-GuardShimPath { return (Join-Path (Get-GuardWindowsDir) 'guard.cmd') }
 function Get-GuardShimText([string]$Dir) { return "@powershell -NoProfile -ExecutionPolicy Bypass -File `"$Dir\guard.ps1`" %*`r`n" }
 function Add-GuardShim([string]$Dir) {
     $p = Get-GuardShimPath; $t = Get-GuardShimText $Dir
@@ -137,7 +170,7 @@ function Start-GuardWatch {
     param([string]$Dir, [string]$User)
     try { Get-ScheduledTask -TaskName $script:GuardTask -ErrorAction Stop | Out-Null; Start-ScheduledTask -TaskName $script:GuardTask; return 'task' } catch { }
     if (-not (Test-Path -LiteralPath (Join-Path $Dir 'guard.cmd'))) { return $null }
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Dir\guard-watch.ps1`" -User `"$User`""
+    Start-Process (Get-GuardPowerShellExe) -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Dir\guard-watch.ps1`" -User `"$User`""
     return 'direct'
 }
 
@@ -147,6 +180,12 @@ $script:BuiltinSkip = @('~$*', '*.tmp', '*.temp', '*.crdownload', '*.part', 'Thu
 function Get-GuardUser {
     # The account guard denies delete to = the interactive user who owns the files.
     return [Security.Principal.WindowsIdentity]::GetCurrent().Name  # e.g. DESKTOP-xxx\ojhas
+}
+
+function Test-GuardNoUser([string]$User) {
+    # An empty account name makes icacls put the rule on BUILTIN (S-1-5-32) instead of on you:
+    # the lock looks done and protects nothing. Every lock refuses it, so the failure shows.
+    return [string]::IsNullOrWhiteSpace($User)
 }
 
 function Test-GuardSkip {
@@ -175,7 +214,7 @@ function Invoke-Icacls {
     # redirected under ErrorActionPreference=Stop, would throw and kill the shell or the watcher.
     param([string[]]$IcaclsArgs)
     $ErrorActionPreference = 'Continue'
-    $out = & icacls.exe @IcaclsArgs 2>&1 | ForEach-Object { "$_" }
+    $out = & (Get-GuardTool 'icacls.exe') @IcaclsArgs 2>&1 | ForEach-Object { "$_" }
     return [pscustomobject]@{ Ok = ($LASTEXITCODE -eq 0); Code = $LASTEXITCODE; Out = ($out -join "`n") }
 }
 
@@ -184,6 +223,7 @@ function Lock-GuardFile {
     # -Force: lock even if open (used to put a lock back after a delete/move that failed)
     param([string]$Path, [string]$User, [string[]]$Skip = @(), [switch]$Force)
     $name = Split-Path $Path -Leaf
+    if (Test-GuardNoUser $User) { return [pscustomobject]@{ Path=$Path; State='fail'; Reason='no account to lock for' } }
     if (Test-GuardSkip -Name $name -Extra $Skip) { return [pscustomobject]@{ Path=$Path; State='skipped'; Reason='skip-list' } }
     if (-not $Force -and (Test-GuardBusy -Path $Path)) { return [pscustomobject]@{ Path=$Path; State='waiting'; Reason='open in another program' } }
     if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
@@ -209,6 +249,7 @@ function Set-GuardOwnerSystem {
     # back so files still open and programs can still add new files. Admin only.
     param([string]$Folder, [string]$User)
     if (-not (Test-GuardAdmin)) { return [pscustomobject]@{ Ok=$false; Reason='not admin' } }
+    if (Test-GuardNoUser $User) { return [pscustomobject]@{ Ok=$false; Reason='no account to lock for' } }
     $r1 = Invoke-Icacls @($Folder, '/setowner', 'NT AUTHORITY\SYSTEM', '/T', '/C')
     # cut inheritance (keep copies), then replace the user's Full Control with Modify:
     # read, write, add files, but no permission changes and no take-ownership.
@@ -249,6 +290,7 @@ function Lock-GuardFolder {
     # the folder above can't delete this folder through its key (DC).
     param([string]$Folder, [string]$User)
     $above = Split-Path $Folder -Parent
+    if (Test-GuardNoUser $User) { return [pscustomobject]@{ Folder=$false; FolderOut='no account to lock for'; Above=$false; AboveOut='no account to lock for'; Ok=$false } }
     $r1 = Invoke-Icacls @($Folder, '/deny', ($User+':(DE,DC)'))
     $r2 = Invoke-Icacls @($above,  '/deny', ($User+':(DC)'))
     return [pscustomobject]@{
@@ -279,6 +321,7 @@ function Lock-GuardSubfolder {
     # A subfolder can't be renamed or moved out (DE) and can't delete what is inside it (DC).
     # Its files are locked one by one too.
     param([string]$Path, [string]$User)
+    if (Test-GuardNoUser $User) { return $false }
     if (Test-GuardAdmin) { Invoke-Icacls @($Path, '/setowner', 'NT AUTHORITY\SYSTEM') | Out-Null }
     return (Invoke-Icacls @($Path, '/deny', ($User+':(DE,DC)'))).Ok
 }

@@ -49,7 +49,9 @@ function Config-Stamp {
 }
 
 function Load-WatchConfig {
-    $c = Read-GuardJson -Path $script:GuardConfigPath
+    # only a config.json written by guard (owner SYSTEM / Administrators) is acted on
+    $c = $null
+    if (Test-GuardTrustedFile $script:GuardConfigPath) { $c = Read-GuardJson -Path $script:GuardConfigPath }
     if (-not $c) { $c = New-GuardConfig }
     $script:LoadedSaved = $c.saved
     return $c
@@ -104,6 +106,7 @@ function Full-Check($cfg) {
 }
 
 # ---- start ----------------------------------------------------------------
+Initialize-GuardDataDir | Out-Null   # the data folder: only SYSTEM and administrators may write in it
 $stamp = Config-Stamp          # taken BEFORE loading: a change while we start is never missed
 $cfg = Load-WatchConfig
 Write-WatchStatus 'starting'

@@ -23,6 +23,8 @@ $dot = [string][char]0x00B7; $arrow = [string][char]0x2192
 $ErrorActionPreference = 'Stop'
 $repo = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard/main'
 $runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1')
+# full path, never "powershell.exe" alone: the elevated side must not depend on PATH
+$psExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 function Is-Admin { $id=[Security.Principal.WindowsIdentity]::GetCurrent(); (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 
 # Test overrides from the environment only when they can't help an attacker: in a process
@@ -188,7 +190,7 @@ function Request-GuardAdmin([string]$Text, [string]$ArgList) {
     $dots = Start-InstallDots $Text
     if (-not $dots) { Write-Host ($Text + '...') }
     $ps = [PowerShell]::Create()
-    [void]$ps.AddScript({ param($a) try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList)
+    [void]$ps.AddScript({ param($a, $exe) try { Start-Process $exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList).AddArgument($psExe)
     $run = $ps.BeginInvoke()
     $p = $null; $t0 = $null
     try {
@@ -218,43 +220,92 @@ function Wait-GuardCallerDots([int]$CallerPid) {
     } catch { }
 }
 
+function Get-StagedRun([string]$File, [string[]]$Rest) {
+    # The elevated copy must never run a file a normal program can change. Through  irm | iex
+    # (or from a file in Downloads) our file sits in a folder every program of this user can
+    # write to, and the UAC prompt waits for seconds: long enough to swap it. So the elevated
+    # side starts with a few lines (passed on its command line, not in a file) that read the
+    # file once, check it is byte for byte the one this window wrote (SHA-256), copy it into
+    # Program Files (only administrators can write there) and run that copy.
+    $bytes = [IO.File]::ReadAllBytes($File)
+    $hash = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    $lit = { param($s) "'" + ($s -replace "'", "''") + "'" }
+    # separate words, not 'a','b': after a program name PowerShell 5.1 passes 'a','b' as ONE
+    # argument "a,b", and the checked copy would get no -Prefix / -Source at all
+    $argList = (@($Rest) | ForEach-Object { & $lit $_ }) -join ' '
+    $boot = @(
+        '$env:PSModulePath = [IO.Path]::Combine($PSHOME, ''Modules'')'
+        '$b = [IO.File]::ReadAllBytes(' + (& $lit $File) + ')'
+        '$h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString(''x2'') })'
+        'if ($h -ne ''' + $hash + ''') { [Console]::Error.WriteLine(''guard: the installer file was changed while Windows asked for administrator rights. Nothing was installed. Run the install line again.''); exit 87 }'
+        '$pf = [Microsoft.Win32.RegistryKey]::OpenBaseKey(''LocalMachine'', [Microsoft.Win32.RegistryView]::Registry64).OpenSubKey(''SOFTWARE\Microsoft\Windows\CurrentVersion'').GetValue(''ProgramFilesDir'')'
+        '$d = [IO.Path]::Combine($pf, ''guard'', ''staging''); [void][IO.Directory]::CreateDirectory($d)'
+        '$s = [IO.Path]::Combine($d, ''install-'' + [guid]::NewGuid().ToString(''N'') + ''.ps1''); [IO.File]::WriteAllBytes($s, $b)'
+        '$c = 1'
+        'try { & ([IO.Path]::Combine([Environment]::SystemDirectory, ''WindowsPowerShell\v1.0\powershell.exe'')) -NoProfile -ExecutionPolicy Bypass -File $s ' + $argList + '; $c = $LASTEXITCODE } finally { [IO.File]::Delete($s) }'
+        'exit $c'
+    ) -join "`n"
+    return ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($boot)))
+}
+
 if ($AttachTo) {
+    # (this file is the checked copy in Program Files: see Get-StagedRun)
     $fwd = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Granted -Caller $AttachTo -ForUser `"$who`" -Prefix `"$Prefix`""
     if ($Source) { $fwd += " -Source `"$Source`"" }
     if (Join-CallerConsole $AttachTo) {
-        $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $fwd
+        $si = New-Object Diagnostics.ProcessStartInfo $psExe, $fwd
         $si.UseShellExecute = $false        # inherits the caller's window
         $p = [Diagnostics.Process]::Start($si); $p.WaitForExit(); exit $p.ExitCode
     }
-    Start-Process powershell.exe -ArgumentList "$fwd -Pause"
+    # a window of its own; wait for it: the checked copy is deleted when this one ends
+    $p = Start-Process $psExe -ArgumentList "$fwd -Pause" -PassThru; $p.WaitForExit()
     exit
 }
+$tempSelf = $null
 if (-not $self) {
-    $self = Join-Path $env:TEMP 'guard-install.ps1'
+    # random name: a fixed one could be taken first by another program
+    $self = Join-Path $env:TEMP ('guard-install-' + [guid]::NewGuid().ToString('N') + '.ps1'); $tempSelf = $self
     $text = $null
     if ($Source) { $text = Get-Content (Join-Path (Split-Path $Source -Parent) 'install.ps1') -Raw -Encoding UTF8 }
     else { $text = (Invoke-WebRequest "$repo/install.ps1" -UseBasicParsing).Content }
     [IO.File]::WriteAllText($self, $text.TrimStart([char]0xFEFF), (New-Object Text.UTF8Encoding($false)))
     if ((Is-Admin) -or $NoElevate) {
-        $fwd = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self, '-ForUser', $who, '-Prefix', $Prefix)
-        if ($Source) { $fwd += @('-Source', $Source) }
-        if ($NoElevate) { $fwd += '-NoElevate' }
-        & powershell.exe @fwd
+        $rest = @('-ForUser', $who, '-Prefix', $Prefix)
+        if ($Source) { $rest += @('-Source', $Source) }
+        if ($NoElevate) { $rest += '-NoElevate' }
+        try {
+            # elevated: through the checked copy; not elevated (tests): nothing to gain, run it as is
+            # (a direct call, as before the check: its output stays in this window's pipeline)
+            if (Is-Admin) { & $psExe @((Get-StagedRun $self $rest) -split ' ') }
+            else { & $psExe @(@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $self) + $rest) }
+        } finally { Remove-Item -LiteralPath $tempSelf -Force -ErrorAction SilentlyContinue }
         return
     }
 }
 if (-not (Is-Admin) -and -not $NoElevate) {
-    $a = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -AttachTo $PID -ForUser `"$who`" -Prefix `"$Prefix`""
-    if ($Source) { $a += " -Source `"$Source`"" }
+    $rest = @('-AttachTo', "$PID", '-ForUser', $who, '-Prefix', $Prefix)
+    if ($Source) { $rest += @('-Source', $Source) }
+    $a = Get-StagedRun $self $rest
     Write-Host ""
     $enc = [Console]::OutputEncoding
     # hidden: it moves into this window, and this one waits until the install is done
     # (this part runs inside the user's own session through  irm | iex: no Write-Host margin
     # wrapper here, so the one-space margin is typed in)
     $p = Request-GuardAdmin ' Requesting Admin Access' $a
-    if (-not $p) { Write-Host " guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return }
+    if (-not $p) {
+        if ($tempSelf) { Remove-Item -LiteralPath $tempSelf -Force -ErrorAction SilentlyContinue }
+        Write-Host " guard  not installed: the administrator prompt was cancelled." -ForegroundColor Red; Write-Host ""; return
+    }
     $p.WaitForExit()
+    if ($tempSelf) { Remove-Item -LiteralPath $tempSelf -Force -ErrorAction SilentlyContinue }
     try { [Console]::OutputEncoding = $enc } catch { }
+    $code = $null; try { $code = $p.ExitCode } catch { }
+    if ($code -eq 87) {
+        Write-Host ""
+        Write-Host " guard  not installed: another program changed the installer file while Windows asked for administrator rights." -ForegroundColor Red
+        Write-Host "        run the install line again. if it happens again, a program on this PC is attacking the install." -ForegroundColor Red
+        Write-Host ""
+    }
     return
 }
 
@@ -321,6 +372,9 @@ try {
 $script:GuardMargin = $script:InstallMargin   # guard's Write-Host (now in charge): same margin
 $ErrorActionPreference = 'Stop'
 $script:User = $u
+# the data folder first, before anything in it is read: protected, and files guard didn't
+# write itself (a planted config.json...) are removed
+$dataRemoved = @(Initialize-GuardDataDir)
 
 # 5 path: the raw registry value, so %SystemRoot% and other %VAR% entries stay as they are
 try {
@@ -332,7 +386,7 @@ try {
 # 6 task
 if ($NoTask) { StepOk 'task' 'skipped (test)' } else {
     try {
-        $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Prefix\guard-watch.ps1`" -User `"$u`""
+        $act = New-ScheduledTaskAction -Execute $psExe -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Prefix\guard-watch.ps1`" -User `"$u`""
         $trg = New-ScheduledTaskTrigger -AtLogOn
         $pr  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
         $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
@@ -344,7 +398,7 @@ if ($NoTask) { StepOk 'task' 'skipped (test)' } else {
 # 7 guard (start the background guard now)
 try {
     if ($NoTask) {
-        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Prefix\guard-watch.ps1`" -User `"$u`""
+        Start-Process $psExe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Prefix\guard-watch.ps1`" -User `"$u`""
     } else { Start-ScheduledTask -TaskName $taskName }
     if ($Update) { StepOk 'guard' 'background guard restarted' } else { StepOk 'guard' 'background guard running' }
 } catch { StepFail 'guard' $_.Exception.Message }
@@ -379,6 +433,7 @@ if ($Update) {
 }
 
 Bar-End
+if ($dataRemoved.Count) { Write-Host ""; Write-Host ("  removed   {0} from {1}: guard didn't write it" -f ($dataRemoved -join ', '), (Split-Path $script:GuardConfigPath -Parent)) -ForegroundColor Yellow }
 Write-Host ""
 if ($Update) { Write-Host "  Guard is Updated Successfully." -ForegroundColor Green; Write-Host "  type:  " -NoNewline; Write-Host "guard" -ForegroundColor Cyan; Done-Pause; return }
 Write-Host "  Guard is Installed Successfully." -ForegroundColor Green

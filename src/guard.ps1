@@ -55,11 +55,11 @@ if ($AttachTo) {
     $c = $Cwd; if ($c.EndsWith('\')) { $c += '.' }
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Caller $AttachTo -Cwd `"$c`" -ForUser `"$ForUser`""
     if (Join-CallerConsole $AttachTo) {
-        $si = New-Object Diagnostics.ProcessStartInfo 'powershell.exe', $psi
+        $si = New-Object Diagnostics.ProcessStartInfo (Get-GuardPowerShellExe), $psi
         $si.UseShellExecute = $false        # inherits the caller's window
         $p = [Diagnostics.Process]::Start($si); $p.WaitForExit(); exit $p.ExitCode
     }
-    Start-Process powershell.exe -ArgumentList "$psi -OwnWindow"
+    Start-Process (Get-GuardPowerShellExe) -ArgumentList "$psi -OwnWindow"
     exit
 }
 if ($Cwd) { try { Set-Location -LiteralPath $Cwd -ErrorAction Stop } catch { } }
@@ -68,6 +68,8 @@ if ($Cwd) { try { Set-Location -LiteralPath $Cwd -ErrorAction Stop } catch { } }
 $script:AdminWarn = ((Test-GuardAdmin) -and -not $Elevated -and -not $NoElevate)
 
 $script:User = $ForUser; if (-not $script:User) { $script:User = Get-GuardUser }
+# the data folder: protected, and anything in it guard didn't write is removed (and said)
+$script:DataRemoved = @(Initialize-GuardDataDir)
 $hadMaster = Test-Path -LiteralPath $script:GuardConfigPath
 $script:Cfg  = Load-GuardConfig
 if (-not $hadMaster -and $script:MemoryFoundIn) {
@@ -94,6 +96,7 @@ function Prompt-Loop {
     if (-not $Elevated) { Write-Host "" }
     Show-AdminWarn
     Show-Table
+    if ($script:DataRemoved.Count) { Write-Host ("removed   {0} from {1}: guard didn't write it" -f ($script:DataRemoved -join ', '), (Split-Path $script:GuardConfigPath -Parent)) -ForegroundColor Yellow }
     if ($script:Rebuilt) { Write-Host ("memory    rebuilt from {0}" -f $script:Rebuilt) -ForegroundColor Green }
     Show-Status -All
     while ($true) {

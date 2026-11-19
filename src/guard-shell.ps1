@@ -313,7 +313,7 @@ function Request-GuardAdmin([string]$Text, [string]$ArgList) {
     if (-not $dots) { Write-Host ($Text + '...') }
     # the prompt blocks whoever opens it: open it on another thread so the dots keep moving
     $ps = [PowerShell]::Create()
-    [void]$ps.AddScript({ param($a) try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList)
+    [void]$ps.AddScript({ param($a, $exe) try { Start-Process $exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList $a } catch { } }).AddArgument($ArgList).AddArgument((Get-GuardPowerShellExe))
     $run = $ps.BeginInvoke()
     $p = $null; $t0 = $null
     try {
@@ -374,7 +374,7 @@ function Test-GuardPlace([string]$path, [string]$except = '') {
     # Returns why $path can't be a protected folder, or $null if it can.
     # Nested protected folders would strip each other's rules, so they are refused.
     if (-not (Split-Path $path -Parent)) { return "a whole drive can't be protected. pick a folder on it" }
-    foreach ($sys in @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    foreach ($sys in @((Get-GuardWindowsDir), (Get-GuardProgramFiles), (Get-GuardProgramFilesX86), (Get-GuardProgramData))) {
         if ($sys -and (($path -ieq $sys) -or $path.StartsWith($sys.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) { return "Windows and program folders can't be protected: $sys" }
     }
     foreach ($o in $script:Cfg.folders) {
@@ -553,6 +553,7 @@ function Read-WatchStatus {
     # the background guard may be writing it right now: try a few times
     $file = Join-Path (Split-Path $script:GuardConfigPath -Parent) 'watch-status.json'
     if (-not (Test-Path -LiteralPath $file)) { return $null }
+    if (-not (Test-GuardTrustedFile $file)) { return $null }   # not written by the background guard
     for ($i = 0; $i -lt 5; $i++) {
         try { return (Get-Content -LiteralPath $file -Raw -ErrorAction Stop | ConvertFrom-Json) } catch { Start-Sleep -Milliseconds 100 }
     }
@@ -924,7 +925,7 @@ function Cmd-Edit($arg) {
         Ok "unlocked" ("folder + folder above + {0} files" -f $f.editingFiles)
         if (-not (Test-Quiet)) {
             # explorer.exe opens the window in the user's normal (not admin) session
-            try { Start-Process explorer.exe -ArgumentList "`"$($f.path)`""; Ok "opened" "in Explorer" } catch { }
+            try { Start-Process (Join-Path (Get-GuardWindowsDir) 'explorer.exe') -ArgumentList "`"$($f.path)`""; Ok "opened" "in Explorer" } catch { }
         }
     }
     Say "  edit, save, rename, delete freely. locks again at next logon, or type  resume"
@@ -1176,7 +1177,17 @@ function Invoke-GuardRestore {
     # Shows the folders an old _guard.json lists, asks once, then protects the ones that exist.
     # Returns $true if restored, $false if the user chose to start fresh.
     param($Memory, [string]$Where)
-    $list = @($Memory.folders)
+    # a _guard.json sits in a normal folder: any program could have written it. So the list
+    # goes through the same checks as init (no drive, no Windows or program folders...), and
+    # skip lists from it are not taken over: a planted '*' would leave everything unlocked.
+    $list = @()
+    foreach ($f in @($Memory.folders)) {
+        if (-not $f -or -not $f.path -or -not [IO.Path]::IsPathRooted([string]$f.path)) { continue }
+        $bad = Test-GuardPlace ([string]$f.path)
+        if ($bad) { Say ("  ignored   {0}  ·  {1}" -f $f.path, $bad) 'Red'; continue }
+        $list += [pscustomobject]@{ path = [string]$f.path; name = (Get-FolderName ([string]$f.path)); skip = @(); added = $f.added }
+    }
+    if ($list.Count -eq 0) { Say "  the memory lists no folder guard can protect"; return $false }
     Say ""; Say ("  guard memory found in {0}. it lists {1} protected folders:" -f $Where, $list.Count)
     $i = 1
     foreach ($f in $list) {
@@ -1216,6 +1227,7 @@ function Invoke-GuardRestore {
     $m = "_guard.json updated in {0}" -f $found.Count
     if ($missing) { $m += ("  ·  {0} missing kept in the list" -f $missing) }
     Ok "memory" $m
+    if (@($Memory.folders | Where-Object { $_.skip -and @($_.skip).Count }).Count) { Say "  skip lists from the memory were not taken over: add them again with  skip <pattern>" 'DarkGray' }
     Say ""; if ($found.Count -eq 1) { Say "  Folder is Protected Successfully." 'Green' } else { Say ("  {0} Folders are Protected Successfully." -f $found.Count) 'Green' }
     return $true
 }
@@ -1450,7 +1462,7 @@ guard $($script:GuardVersion) · PowerShell $($PSVersionTable.PSVersion) · Wind
 function Open-GuardIssue([string]$Url) {
     # explorer.exe hands the link to the user's normal (not admin) browser
     if (Get-GuardTestEnv 'GUARD_NOBROWSER') { return $false }
-    try { Start-Process explorer.exe -ArgumentList "`"$Url`""; return $true } catch { return $false }
+    try { Start-Process (Join-Path (Get-GuardWindowsDir) 'explorer.exe') -ArgumentList "`"$Url`""; return $true } catch { return $false }
 }
 
 # ---- update / uninstall ---------------------------------------------------
@@ -1460,11 +1472,16 @@ function Cmd-Update {
     $v = Invoke-WithDots '  checking for a new version' { Get-GuardRemoteVersion }
     if (-not $v) { Say "  can't reach GitHub right now. try again later." 'Red'; return $true }
     if (-not (Test-GuardNewer $v)) { Say ("  you have the newest version ({0})" -f $script:GuardVersion); return $true }
-    $tmp = Join-Path $env:TEMP ('guard-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    # not the Temp folder: any program can swap a file there before the elevated guard runs it.
+    # staging\ is inside the program folder, where only administrators can write.
+    $stage = Join-Path $script:InstallDir 'staging'
+    $tmp = Join-Path $stage ('install-' + [guid]::NewGuid().ToString('N') + '.ps1')
     $text = Invoke-WithDots '  downloading' { try { Get-GuardSourceText 'install.ps1' } catch { $null } }
     if (-not $text) { Say "  download failed. check the internet connection and try again." 'Red'; return $true }
-    try { [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($true))) }
-    catch { Say "  download failed: $($_.Exception.Message)" 'Red'; return $true }
+    try {
+        if (-not (Test-Path -LiteralPath $stage)) { New-Item -ItemType Directory -Path $stage -Force | Out-Null }
+        [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($true)))
+    } catch { Say "  download failed: $($_.Exception.Message)" 'Red'; return $true }
     & $tmp -Prefix $script:InstallDir -NoElevate -Update -From $script:GuardVersion -To $v -ForUser $script:User
     Remove-Item $tmp -Force -EA SilentlyContinue
     return $false    # the program files changed under us: close, user types guard again
@@ -1504,7 +1521,8 @@ function Cmd-Uninstall {
     if (Test-GuardShimFor $dir) { $later += "del /f /q `"$(Get-GuardShimPath)`""; $shimGone = $true }
     # only delete a real install folder (has guard.cmd), never a source checkout
     if (Test-Path -LiteralPath (Join-Path $dir 'guard.cmd')) { $later += "rd /s /q `"$dir`"" }
-    if ($later.Count) { Start-Process cmd.exe -WindowStyle Hidden -ArgumentList ("/c ping -n 3 127.0.0.1 >nul & " + ($later -join ' & ')) }
+    # full paths, and /d: cmd skips the AutoRun commands any user can put in the registry
+    if ($later.Count) { Start-Process (Get-GuardTool 'cmd.exe') -WindowStyle Hidden -ArgumentList ("/d /c `"`"$(Get-GuardTool 'PING.EXE')`" -n 3 127.0.0.1 >nul & " + ($later -join ' & ') + '"') }
     if ($shimGone) { Ok "removed" (Get-GuardShimPath) }
     if (Test-Path -LiteralPath (Join-Path $dir 'guard.cmd')) { Ok "removed" $dir }
     $data = Split-Path $script:GuardConfigPath -Parent

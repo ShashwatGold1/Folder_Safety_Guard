@@ -4,7 +4,7 @@ $script:GuardConfigPath = Join-Path $env:TEMP ('guardtest-' + [guid]::NewGuid().
 . "$PSScriptRoot\guard-config.ps1"
 
 $ErrorActionPreference = 'Continue'
-$root  = "C:\Users\ojhas\Desktop\Folder_Safety_Guard\testing_env"
+$root  = Join-Path (Split-Path $PSScriptRoot -Parent) 'testing_env'
 $shots = Join-Path $root 'shots'
 $docs  = Join-Path $root 'docs'
 $user  = Get-GuardUser

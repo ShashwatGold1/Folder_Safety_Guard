@@ -14,7 +14,7 @@ $script:BadgeIds  = [ordered]@{
     partly    = @('  guard partly',    '{6E58515F-415E-47BD-91E2-68E340A81040}')
 }
 $script:BadgeLook = 'lock-1'   # change it when the pictures change: new file names, so Explorer drops its cached ones
-$script:DotNet    = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
+$script:DotNet    = Join-Path (Get-GuardWindowsDir) 'Microsoft.NET\Framework64\v4.0.30319'
 
 # ---- the list Explorer's helper reads ----------------------------------------------------
 #   protected|C:\Shots           a protected folder (everything inside: green)
@@ -166,7 +166,9 @@ function Install-GuardBadges {
     $bdir = Split-Path $dll -Parent
     if (-not (Test-Path -LiteralPath $bdir)) { New-Item -ItemType Directory -Path $bdir -Force | Out-Null }
     if (-not (Test-Path -LiteralPath $dll)) {
-        $cs = Join-Path $env:TEMP ('guard-badges-' + [guid]::NewGuid().ToString('N') + '.cs')
+        # the source goes next to the DLL (program folder: only administrators can write), not
+        # to Temp, where any program could swap it before the compiler reads it
+        $cs = Join-Path $bdir ('build-' + [guid]::NewGuid().ToString('N') + '.cs')
         try {
             [IO.File]::WriteAllText($cs, $script:BadgeCode)
             $out = & (Join-Path $script:DotNet 'csc.exe') /nologo /target:library /optimize "/out:$dll" $cs 2>&1
@@ -212,7 +214,9 @@ function Remove-GuardFileLater([string]$Path, [switch]$AtRestart) {
         if (-not ('GuardNative.Files' -as [type])) {
             Add-Type -Namespace GuardNative -Name Files -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string a, string b, int f);'
         }
-        [GuardNative.Files]::MoveFileEx($Path, $null, 4) | Out-Null   # MOVEFILE_DELAY_UNTIL_REBOOT
+        # MOVEFILE_DELAY_UNTIL_REBOOT; [NullString]::Value, because PowerShell turns $null into ""
+        # and Windows then answers "path not found" and schedules nothing
+        [GuardNative.Files]::MoveFileEx($Path, [NullString]::Value, 4) | Out-Null
     } catch { }
 }
 
@@ -220,7 +224,7 @@ function Restart-GuardExplorer {
     # Explorer loads its overlay helpers only when it starts. Windows starts it again by itself.
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
     for ($i = 0; $i -lt 24; $i++) { Start-Sleep -Milliseconds 250; if (Get-Process explorer -ErrorAction SilentlyContinue) { return } }
-    Start-Process explorer.exe
+    Start-Process (Join-Path (Get-GuardWindowsDir) 'explorer.exe')
 }
 
 # ---- the pictures -------------------------------------------------------------------------

@@ -5,7 +5,7 @@ $env:GUARD_CONFIG = Join-Path $cfgDir 'config.json'
 . "$PSScriptRoot\guard-config.ps1"
 
 $ErrorActionPreference='Continue'
-$root="C:\Users\ojhas\Desktop\Folder_Safety_Guard\testing_env"; $shots=Join-Path $root 'shots'
+$root=Join-Path (Split-Path $PSScriptRoot -Parent) 'testing_env'; $shots=Join-Path $root 'shots'
 $user = Get-GuardUser
 $pass=0;$fail=0
 function Check($n,$c){ if($c){Write-Host "  PASS  $n" -ForegroundColor Green;$script:pass++}else{Write-Host "  FAIL  $n" -ForegroundColor Red;$script:fail++} }

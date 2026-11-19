@@ -10,7 +10,7 @@ $envKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKey, $true); $k.SetValue('GUARD_TEST', '1'); $k.Close()
 . "$src\guard-shell.ps1"
 $ErrorActionPreference = 'Continue'
-$root   = 'C:\Users\ojhas\Desktop\Folder_Safety_Guard\testing_env'
+$root   = Join-Path (Split-Path $src -Parent) 'testing_env'
 $folder = Join-Path $root 'owntest'
 $user   = Get-GuardUser
 $pass=0; $fail=0

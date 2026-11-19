@@ -45,4 +45,6 @@ Inside guard:
 - uninstall  unlocks everything and removes guard. Your files
   stay on the disk.
 
-Tests: src/run-tests.ps1, src/verify-e2e.ps1 (admin).
+Tests: src/run-tests.ps1, src/verify-e2e.ps1 (admin), src/redteam.ps1
+(admin: attacks guard from a program without admin rights; every
+attack must fail).
