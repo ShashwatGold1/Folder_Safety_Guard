@@ -118,7 +118,7 @@ function Test-GuardShimFor([string]$Dir) {
 # publisher's PC, needs a PIN and administrator rights to use, and can't be copied out. Someone
 # who gets into the GitHub account (or an AI agent pushing code) can change main, but can't make
 # a list this key accepts. guard-sign.ps1 -Setup writes the key below (and the same in install.ps1).
-$script:GuardReleaseKey  = ''
+$script:GuardReleaseKey  = 'lq1hSzjbsJ/vEI7+4kCOSotLQM2Q45X2AmJ7BHCFzrzCmGLBj5pAQVTbjYrVUlrtWyABbXulWE5PoZKDMkOBRGDtgPsKOPxUGYo97wPPKNcuG/BDOeCgulGDVVJyaZTMEDA3lMnPe1kOM2klNZ1trcVMqtu62xR+kswHxxsE+RU63cOMdoZ+lOlwc7UzS6xbGX58s5MPdDiTNqHddKXXAmCv892gfAl20AmQonhMnRTb2SaQSHTsCA1H2nEsYn1CEpKIVnd0PIMw8+JrRUZ1t+AuWLmScsnSYY2NlM55+GIc6H2JfPjKg1ER3HKnk7d3YY++KAF9XKUf7rNKwVMt1w=='
 $script:GuardReleaseBase = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard'
 
 function Get-GuardReleaseKey {

@@ -25,7 +25,7 @@ $runtime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','
 # Signed releases (see guard-core.ps1): files come only from the commit named in release.json,
 # and only when that list is signed with this key and every hash matches. Never from main as is.
 # guard-sign.ps1 -Setup writes the key here and in guard-core.ps1.
-$releaseKey  = ''
+$releaseKey  = 'lq1hSzjbsJ/vEI7+4kCOSotLQM2Q45X2AmJ7BHCFzrzCmGLBj5pAQVTbjYrVUlrtWyABbXulWE5PoZKDMkOBRGDtgPsKOPxUGYo97wPPKNcuG/BDOeCgulGDVVJyaZTMEDA3lMnPe1kOM2klNZ1trcVMqtu62xR+kswHxxsE+RU63cOMdoZ+lOlwc7UzS6xbGX58s5MPdDiTNqHddKXXAmCv892gfAl20AmQonhMnRTb2SaQSHTsCA1H2nEsYn1CEpKIVnd0PIMw8+JrRUZ1t+AuWLmScsnSYY2NlM55+GIc6H2JfPjKg1ER3HKnk7d3YY++KAF9XKUf7rNKwVMt1w=='
 $releaseBase = 'https://raw.githubusercontent.com/ShashwatGold1/Folder_Safety_Guard'
 # full path, never "powershell.exe" alone: the elevated side must not depend on PATH
 $psExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
