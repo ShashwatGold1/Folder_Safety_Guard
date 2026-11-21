@@ -33,6 +33,8 @@ Invoke-GuardCommand "delete godaddy" | Out-Null
 Check "godaddy-dns.png gone"         (-not (Test-Path (Join-Path $shots 'godaddy-dns.png')))
 
 Write-Host "`n== edit unlocks, resume re-locks ==" -ForegroundColor Cyan
+$o = Invoke-GuardCommand "edit todo" 6>&1 | Out-String
+Check "edit <unknown word>: unlocks nothing" (($o -match 'nothing was unlocked') -and -not (TryDelete (Join-Path $shots 'amazon-checkout.png')))
 Invoke-GuardCommand "edit" | Out-Null
 Check "after edit, file deletable"   (TryDelete (Join-Path $shots 'amazon-checkout.png'))
 Invoke-GuardCommand "resume" | Out-Null

@@ -14,7 +14,7 @@ $script:BadgeIds  = [ordered]@{
     partly    = @('  guard partly',    '{6E58515F-415E-47BD-91E2-68E340A81040}')
     sealed    = @('  guard sealed',    '{3C8F2B71-5E4A-4D09-9B6E-7A1D2C4F8E53}')   # Security Vault: blue shield
 }
-$script:BadgeLook = 'lock-2'   # change it when the pictures change: new file names, so Explorer drops its cached ones
+$script:BadgeLook = 'lock-3'   # change it when the pictures change: new file names, so Explorer drops its cached ones
 $script:DotNet    = Join-Path (Get-GuardWindowsDir) 'Microsoft.NET\Framework64\v4.0.30319'
 
 # ---- the list Explorer's helper reads ----------------------------------------------------
@@ -243,10 +243,13 @@ function Save-GuardBadgeIcon([string]$Path, [string]$Color, [string]$Kind) {
     Add-Type -AssemblyName System.Drawing
     $fill = [Drawing.ColorTranslator]::FromHtml($Color)
     $sizes = 256, 64, 48, 32, 16
+    # the badge's share of the icon, as Google Drive's round badges have it (measured from its
+    # overlay icons): bigger at small sizes, so it stays readable; flush in the corner
+    $share = @{ 256 = 0.47; 64 = 0.48; 48 = 0.48; 32 = 0.59; 16 = 0.63 }
     $pngs = foreach ($s in $sizes) {
         $bmp = New-Object Drawing.Bitmap $s, $s
         $g = [Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'
-        $d = [Math]::Round($s * 0.42); $x = [Math]::Round($s * 0.02); $y = $s - $d - [Math]::Round($s * 0.02)
+        $d = [Math]::Round($s * $share[$s]); $x = 0; $y = $s - $d
         # white ring, coloured disc
         $g.FillEllipse([Drawing.Brushes]::White, $x, $y, $d, $d)
         $r = [Math]::Max(1, $d * 0.09)

@@ -927,6 +927,10 @@ function Cmd-Move($arg) {
 
 function Cmd-Edit($arg) {
     $targets = @()
+    if ($arg -and $arg -ne 'all') {
+        # unknown words never unlock anything: "edit todo" once silently unlocked the whole folder
+        Say "  edit unlocks the whole folder:  edit  (this folder)  or  edit all  (every folder). nothing was unlocked." 'Yellow'; return
+    }
     if ($arg -eq 'all') { $targets = $script:Cfg.folders } else { $c = Cur; if ($c) { $targets = @($c) } }
     if ($targets.Count -eq 0) { Say "  no folder protected yet" 'Red'; return }
     # tell the background guard first, and wait until it has seen it, then unlock

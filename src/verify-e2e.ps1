@@ -222,6 +222,8 @@ Check 'nothing lost in A' ((Test-Path "$A\amazon-checkout.png") -and (Test-Path 
 # ---------------------------------------------------------------------------
 Section 'edit / resume'
 Invoke-GuardCommand 'use 1' 6>&1 | Out-Null
+$o = Out-Of 'edit todo'
+Check 'edit <unknown word>: unlocks nothing, says how' (($o -match 'nothing was unlocked') -and (IsLocked "$A\godaddy-dns.png") -and (IsLocked $A))
 Invoke-GuardCommand 'edit' 6>&1 | Out-Null
 Check 'edit: file no longer locked' (-not (IsLocked "$A\godaddy-dns.png"))
 Check 'edit A keeps the folder-above rule Beta still needs' (IsLocked $root)
