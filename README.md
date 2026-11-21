@@ -83,7 +83,38 @@ Tests: src/run-tests.ps1, src/verify-e2e.ps1 (admin), src/redteam.ps1
 (admin: attacks guard from a program without admin rights; every
 attack must fail).
 
-Publishing (maintainer): in a normal terminal in the repo,
-src/guard-sign.ps1 -Setup once (makes the TPM key, asks a new PIN),
-then src/guard-sign.ps1 for every release (asks admin, shows what it
-signs, needs YES + the PIN).
+## Signing releases (only the publisher)
+
+Only the owner of this GitHub repo runs this. People who install
+guard never do: install and update check the signature by
+themselves.
+
+Why it can't be automated: the PIN is the one step only a human can
+do. If a program could sign, a hijacked AI agent could sign bad code
+too. Everything else (making the key, hashing every file, checking,
+committing, pushing) is automatic.
+
+Right now no release key is set up, so install and update take the
+newest code from GitHub unsigned. After the setup below, they accept
+only releases you signed.
+
+Open a normal PowerShell (not as administrator) and go to the repo:
+
+    cd C:\Users\ojhas\Desktop\Folder_Safety_Guard
+
+Once, ever (makes the key in this PC's TPM chip):
+
+    .\src\guard-sign.ps1 -Setup
+
+Click Yes, then choose a PIN and type it twice. It must be at least
+12 characters, for example  555555555555  (don't use this one for
+real). Write it on paper: it can't be reset or recovered, and a new
+key means every guard must be reinstalled.
+
+Every time you want people to get a new version:
+
+    .\src\guard-sign.ps1
+
+Click Yes. It shows the version and what changed; type YES, then
+your PIN. It signs and pushes by itself. Until you sign, everyone
+stays on the last signed version, even if new code is pushed.
