@@ -151,10 +151,11 @@ if ($SignCommit) {
 
 # ============================= normal part: your terminal =================================
 function Say([string]$t, [string]$c = 'Gray') { Write-Host "  $t" -ForegroundColor $c }
-function Git { $ErrorActionPreference = 'Continue'; $o = & git -C $script:R @args 2>&1 | ForEach-Object { "$_" }; if ($LASTEXITCODE) { throw ("git " + ($args -join ' ') + ": " + ($o | Out-String).Trim()) }; return $o }
+# (git.exe: PowerShell names ignore case, so a plain  git  here would call this function again, forever)
+function Git { $ErrorActionPreference = 'Continue'; $o = & git.exe -C $script:R @args 2>&1 | ForEach-Object { "$_" }; if ($LASTEXITCODE) { throw ("git " + ($args -join ' ') + ": " + ($o | Out-String).Trim()) }; return $o }
 if (Test-GuardAdmin) { Say 'run this in a NORMAL terminal (not administrator): git must not run with admin rights here.' 'Red'; exit 1 }
 if (-not $SignRepo) { $SignRepo = Split-Path $signHere -Parent }
-$script:R = (& git -C $SignRepo rev-parse --show-toplevel 2>$null); if (-not $script:R) { Say "not a git repo: $SignRepo" 'Red'; exit 1 }
+$script:R = (& git.exe -C $SignRepo rev-parse --show-toplevel 2>$null); if (-not $script:R) { Say "not a git repo: $SignRepo" 'Red'; exit 1 }
 $script:R = $script:R -replace '/', '\'
 try {
     if ((Git rev-parse --abbrev-ref HEAD) -ne 'main') { throw 'switch to the main branch first' }

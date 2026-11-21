@@ -65,6 +65,14 @@ try {
     $k = Get-CodeKeys ([IO.File]::ReadAllText("$repo\src\guard-core.ps1")) ([IO.File]::ReadAllText("$repo\install.ps1"))
     Check 'install.ps1 and guard-core.ps1 have the same release key' ($k[0] -ceq $k[1])
     Check 'the test key overrides only in test mode (non-admin here)' ((Get-GuardReleaseKey) -eq $key)
+
+    Write-Host "`n== the signer itself runs (not only its functions) ==" -ForegroundColor Cyan
+    # a folder that isn't a git repo: it must answer and stop at once (a Git helper that called
+    #  itself once made it hang and crash with no message)
+    $nr = Join-Path $tmp 'not-a-repo'; New-Item -ItemType Directory $nr -Force | Out-Null
+    $sj = Start-Job { param($f, $d) powershell -NoProfile -ExecutionPolicy Bypass -File $f -SignRepo $d *>&1 | Out-String; "exit $LASTEXITCODE" } -ArgumentList "$PSScriptRoot\guard-sign.ps1", $nr
+    $so = ''; if (Wait-Job $sj -Timeout 60) { $so = (Receive-Job $sj) -join "`n" } else { Stop-Job $sj }; Remove-Job $sj -Force
+    Check 'signer answers: not a git repo, exit 1' (($so -match 'not a git repo') -and ($so -match 'exit 1'))
 } finally {
     $env:GUARD_RELEASE_URL = ''; $env:GUARD_RELEASE_KEY = ''
     Remove-Item $tmp -Recurse -Force -EA SilentlyContinue
