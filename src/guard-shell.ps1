@@ -51,9 +51,9 @@ function Get-GuardCompletions([string]$line, [switch]$Paths) {
         }
         'use'    { $words = @(1..([Math]::Max(1, @($script:Cfg.folders).Count)) | ForEach-Object { "$_" }) }
         'skip'   { $words = @('all', 'remove') }
-        { $_ -in 'edit','resume','remove' } { $words = @('all') }
+        { $_ -in 'resume','remove' } { $words = @('all') }
         { $_ -in 'list' } { $words = @('all') }
-        { $_ -in 'delete','move' } {
+        { $_ -in 'delete','move','edit' } {
             $words = @('all'); if ($cmd -eq 'move') { $words += 'folder' }
             $f = $null; if ($script:Cfg -and @($script:Cfg.folders).Count) { $f = Cur }
             if ($f -and (Test-Path -LiteralPath $f.path)) {
@@ -616,7 +616,8 @@ function Test-ItemLocked([string]$Path) {
 
 function Get-FolderState($f) {
     # What the status block needs for one folder.
-    $st = [ordered]@{ Exists = (Test-Path -LiteralPath $f.path -PathType Container); Files = 0; Newest = $null; Missing = 0; Editing = $false }
+    $st = [ordered]@{ Exists = (Test-Path -LiteralPath $f.path -PathType Container); Files = 0; Newest = $null; Missing = 0; Editing = $false
+                      EditItems = @(@($f.editItems) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) }
     if (-not $st.Exists) { return [pscustomobject]$st }
     $files = @(Get-GuardFiles -Folder $f.path)
     $st.Files = $files.Count
@@ -626,6 +627,7 @@ function Get-FolderState($f) {
         $sk = @(Folder-Skip $f); $open = @()
         foreach ($x in $files) {
             if (Test-GuardSkip -Name $x.Name -Extra $sk) { continue }
+            if (Test-GuardUnderAny $x.FullName $st.EditItems) { continue }   # unlocked with  edit <name>
             if (-not (Test-ItemLocked $x.FullName)) { $st.Missing++; $open += $x.FullName }
         }
         Set-GuardBadgeOpen -Folder $f.path -Paths $open   # Explorer: red badge on what isn't locked
@@ -664,6 +666,10 @@ function Show-FolderBlock($f, [int]$i, $w) {
     if ($locked -gt 0) { $what += (" + {0} files" -f $locked) }
     if ($st.Missing -gt 0 -and -not $w.Running) { Say ("lock      {0,-26} {1}" -f 'PARTIAL', $what) 'Red' }
     else { Say ("lock      {0,-26} {1}" -f 'LOCKED', $what) 'Green' }
+    if ($st.EditItems.Count) {
+        $names = @($st.EditItems | ForEach-Object { Split-Path $_ -Leaf }); if ($names.Count -gt 3) { $names = @($names[0..2]) + '...' }
+        Say ("editing   {0,-26} {1}  ·  locks at next logon" -f ("{0} unlocked" -f $st.EditItems.Count), ($names -join ', ')) 'Yellow'
+    }
     Say ("guard     {0,-26} {1}" -f $w.Text, $w.Detail) $w.Color
 }
 
@@ -731,6 +737,7 @@ move <name>               copy or cut files or folders
 move all                  copy or cut everything in the folder
 move folder               move the protected folder somewhere else
 edit                      unlock the folder
+edit <name>               unlock only these files or folders
 resume                    lock the folder
 remove                    stop protecting the folder
 skip                      show files that are never locked
@@ -927,10 +934,7 @@ function Cmd-Move($arg) {
 
 function Cmd-Edit($arg) {
     $targets = @()
-    if ($arg -and $arg -ne 'all') {
-        # unknown words never unlock anything: "edit todo" once silently unlocked the whole folder
-        Say "  edit unlocks the whole folder:  edit  (this folder)  or  edit all  (every folder). nothing was unlocked." 'Yellow'; return
-    }
+    if ($arg -and $arg -ne 'all') { Edit-GuardItems $arg; return }
     if ($arg -eq 'all') { $targets = $script:Cfg.folders } else { $c = Cur; if ($c) { $targets = @($c) } }
     if ($targets.Count -eq 0) { Say "  no folder protected yet" 'Red'; return }
     # tell the background guard first, and wait until it has seen it, then unlock
@@ -957,6 +961,31 @@ function Cmd-Edit($arg) {
     Say "  edit, save, rename, delete freely. locks again at next logon, or type  resume"
 }
 
+function Edit-GuardItems([string]$name) {
+    # edit <name>: unlock only the files / subfolders picked; the folder, the folder above and
+    # everything else stay locked ("edit todo" once unlocked the whole folder)
+    $f = Cur; if (-not $f) { Say "  no folder protected yet" 'Red'; return }
+    if ($f.editing) { Say "  the whole folder is unlocked already  ·  type  resume  to lock it again"; return }
+    $hits = @(Find-Matches $f $name)
+    if ($hits.Count -eq 0) { Say "  no file or folder matches `"$name`"  ·  nothing was unlocked  ·  type  list  to see names"; return }
+    $chosen = @(Pick-Items $hits)
+    if ($chosen.Count -eq 0) { Say "  cancelled  ·  nothing was unlocked"; return }
+    # tell the background guard first, and wait until it has seen it, then unlock
+    $all = @(@($f.editItems) + @($chosen | ForEach-Object { $_.FullName }) | Where-Object { $_ } | Select-Object -Unique)
+    $f | Add-Member -NotePropertyName editItems -NotePropertyValue $all -Force
+    $f | Add-Member -NotePropertyName editItemsSince -NotePropertyValue ((Get-Date).ToString('o')) -Force
+    Save-GuardConfig -Config $script:Cfg -User $script:User
+    Wait-WatchSync
+    Say ""
+    foreach ($x in $chosen) {
+        Unlock-GuardItem $x
+        $what = $x.Name; if ($x.PSIsContainer) { $what += '  (folder, with everything in it)' }
+        Ok "unlocked" $what
+    }
+    Say "  only these: edit, rename, delete freely. the folder and everything else stay locked."
+    Say "  they lock again at next logon, or type  resume"
+}
+
 function Cmd-Resume($arg) {
     $targets = @()
     if ($arg -eq 'all') { $targets = $script:Cfg.folders } else { $c = Cur; if ($c) { $targets = @($c) } }
@@ -976,6 +1005,7 @@ function Cmd-Resume($arg) {
         $r = Invoke-WithDots '  locking' { Lock-GuardTree -Folder $f.path -User $script:User -Skip (Folder-Skip $f) }
         $script:Editing.Remove($f.path)
         $f | Add-Member -NotePropertyName editing -NotePropertyValue $false -Force
+        $f | Add-Member -NotePropertyName editItems -NotePropertyValue @() -Force   # edit <name>: locked again above
         if (-not (Show-LockProblems $r $f.name $f.path)) { Write-Host ("  {0} ok" -f ("locked       folder + folder above + {0} files" -f $r.Locked).PadRight(76)) -ForegroundColor Green }
         foreach ($x in $r.Waiting) { Say ("  not locked yet   {0}   {1}" -f $x.Reason, $x.Name) 'Yellow' }
     }
@@ -1304,6 +1334,7 @@ $script:TableRows = @(
     @('current', 'move', 'move all', 'copy or cut everything in the folder'),
     @('current', 'move', 'move folder', 'move the protected folder somewhere else'),
     @('current', 'edit', 'edit', 'unlock the folder'),
+    @('current', 'edit', 'edit <name>', 'unlock only these files or folders'),
     @('current', 'resume', 'resume', 'lock the folder'),
     @('current', 'remove', 'remove', 'stop protecting the folder'),
     @('current', 'skip', 'skip', 'show files that are never locked'),
@@ -1325,7 +1356,7 @@ $script:HelpShort = [ordered]@{
     'list'='show files in the current folder, newest first, with date and size · list all = every folder'
     'delete'='delete files or folders · matches by part of the name · picker if many · always asks first · delete all = type YES'
     'move'='copy or cut files or folders · asks where to, then cut or copy · move folder = move the protected folder itself'
-    'edit'='unlock the folder · save, rename, delete work · locks again at next logon or with resume · edit all = every folder'
+    'edit'='unlock the folder · save, rename, delete work · locks again at next logon or with resume · edit <name> = only those files or folders · edit all = every folder'
     'resume'='lock the folder again now · also happens by itself at every logon · resume all = every folder'
     'remove'='stop protecting the folder · files stay on the disk · remove all = every folder, type YES'
     'skip'='show, add (skip *.bak) or take out (skip remove *.bak) files that are never locked · skip all <pattern> = every folder'
@@ -1338,6 +1369,10 @@ work. The background guard stops
 locking new files there. Type  resume  to lock again. If you forget, the next
 logon locks everything by itself. While unlocked, AI agents can delete in that
 folder too.
+
+edit <name> unlocks only what you pick: files or subfolders whose name has
+<name> in it (a picker when there are several, like delete). The folder, the
+folder above and everything else stay locked. Same  resume  and same logon rule.
 '@
     'resume'=@'
 Locks the folder, the folder above and every file again right now, and the
@@ -1446,6 +1481,7 @@ function Show-HelpTable {
   move all                copy or cut everything in the folder · type YES
   move folder             move the protected folder itself to a new path · stays protected there
   edit                    unlock the folder and open it in Explorer · save, rename, delete work · locks again at next logon or with resume
+  edit <name>             unlock only those files or subfolders · same picking as delete · the rest stays locked
   resume                  lock the folder again now · also happens by itself at every logon
   remove                  stop protecting the folder · files stay on the disk, just not protected
   skip                    show files that are never locked and can always be deleted (temp files)
@@ -1641,7 +1677,7 @@ function Show-NextLines($w) {
             $st = $null; if ($script:FolderStates) { $st = $script:FolderStates[$f.path] }
             if (-not $st) { $st = Get-FolderState $f }
             if (-not $st.Exists) { $next = "${pre}remove  to forget it  /  init <new path>"; break }
-            if ($st.Editing) { $next = "${pre}resume  when done"; break }
+            if ($st.Editing -or $st.EditItems.Count) { $next = "${pre}resume  when done"; break }
             if (-not $w.Running) {
                 if ($st.Missing -gt 0) { $next = ("{0}resume   (locks the {1} files and restarts the background guard)" -f $pre, $st.Missing) }
                 else { $next = "${pre}resume   (restarts the background guard)" }

@@ -569,6 +569,20 @@ guard>
 
 While a folder is in edit, it is a normal folder: you, Excel, Photoshop, and also AI agents can delete in it. The status line says so until you `resume`.
 
+`edit <name>` unlocks only what you pick: files or subfolders whose name has `<name>` in it (a picker when there are several, like `delete`). The folder, the folder above and everything else stay locked; the background guard leaves the picked ones alone, and they get the orange badge.
+
+```
+guard> edit todo
+
+  TODO - Copy.md               2026-10-19 11:02    1.2 KB   C:\Users\ojhas\Desktop\Test FSG
+
+  unlocked  TODO - Copy.md                                                       ok
+  only these: edit, rename, delete freely. the folder and everything else stay locked.
+  they lock again at next logon, or type  resume
+```
+
+The status block shows them on their own line (`editing   1 unlocked   TODO - Copy.md  ·  locks at next logon`). `resume` locks them again; so does the next logon. A word that matches nothing unlocks nothing.
+
 ---
 
 ## 8. folders / use / init / remove
@@ -732,6 +746,7 @@ guard> help
   move all                copy or cut everything in the folder · type YES
   move folder             move the protected folder itself to a new path · stays protected there
   edit                    unlock the folder and open it in Explorer · save, rename, delete work · locks again at next logon or with resume
+  edit <name>             unlock only those files or subfolders · same picking as delete · the rest stays locked
   resume                  lock the folder again now · also happens by itself at every logon
   remove                  stop protecting the folder · files stay on the disk, just not protected
   skip                    show files that are never locked and can always be deleted (temp files)

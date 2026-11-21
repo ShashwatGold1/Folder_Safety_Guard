@@ -51,6 +51,8 @@ function Write-GuardBadges {
             if (-not $f.path) { continue }
             if ($f.editing) { $new.Add("editing|$($f.path)"); continue }
             if ($sealed -contains $f.path) { $new.Add("sealed|$($f.path)") } else { $new.Add("protected|$($f.path)") }
+            # edit <name>: those files / subfolders orange (the innermost path wins in Explorer)
+            foreach ($e in @($f.editItems)) { if ($e) { $new.Add("editing|$e") } }
             $locked += $f.path
             $own = @(); if ($f.skip) { $own = @($f.skip) }
             foreach ($p in @($script:BuiltinSkip + $own | Select-Object -Unique)) { $new.Add("skip|$($f.path)|$p") }

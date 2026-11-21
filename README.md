@@ -66,6 +66,7 @@ Don't unlock files with an AI agent running.
 Inside guard:
 - delete <name>  delete something on purpose
 - edit / resume  unlock for a while / lock again
+- edit <name>    unlock only those files or subfolders, the rest stays locked
 - security vault on / off   seal / unseal every protected folder
 - check          this PC's safety settings (check fix, check account)
 - help           every command

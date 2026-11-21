@@ -223,7 +223,14 @@ Check 'nothing lost in A' ((Test-Path "$A\amazon-checkout.png") -and (Test-Path 
 Section 'edit / resume'
 Invoke-GuardCommand 'use 1' 6>&1 | Out-Null
 $o = Out-Of 'edit todo'
-Check 'edit <unknown word>: unlocks nothing, says how' (($o -match 'nothing was unlocked') -and (IsLocked "$A\godaddy-dns.png") -and (IsLocked $A))
+Check 'edit <no match>: unlocks nothing' (($o -match 'nothing was unlocked') -and (IsLocked "$A\godaddy-dns.png") -and (IsLocked $A))
+$o = Out-Of 'edit godaddy'
+Check 'edit <name>: only that file unlocked' ((-not (IsLocked "$A\godaddy-dns.png")) -and (IsLocked $A) -and (IsLocked "$A\amazon-checkout.png"))
+Start-Sleep 6
+Check 'edit <name>: background guard (SYSTEM) leaves it unlocked' (-not (IsLocked "$A\godaddy-dns.png"))
+Check 'edit <name>: status shows it' ((Show-Status 6>&1 | Out-String) -match '1 unlocked\s+godaddy-dns\.png')
+[void](Out-Of 'resume')
+Check 'resume: that file locked again' (IsLocked "$A\godaddy-dns.png")
 Invoke-GuardCommand 'edit' 6>&1 | Out-Null
 Check 'edit: file no longer locked' (-not (IsLocked "$A\godaddy-dns.png"))
 Check 'edit A keeps the folder-above rule Beta still needs' (IsLocked $root)

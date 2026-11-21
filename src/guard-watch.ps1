@@ -78,6 +78,10 @@ function Expire-Edits($cfg) {
         if ($f.editing -and $f.editingSince -and ([datetime]$f.editingSince -lt $logon)) {
             $f.editing = $false; $changed = $true
         }
+        # edit <name>: the unlocked files / subfolders too (the full check right after locks them)
+        if (@($f.editItems).Count -and $f.editItemsSince -and ([datetime]$f.editItemsSince -lt $logon)) {
+            $f.editItems = @(); $changed = $true
+        }
     }
     if ($changed) { Save-GuardConfig -Config $cfg -User $User; $script:LoadedSaved = $cfg.saved }
     return $changed
@@ -95,7 +99,7 @@ function Lock-Folders($cfg, $paths) {
         $skip = @(); if ($f.skip) { $skip = @($f.skip) }
         # Security Vault: a file unlocked right now must stay changeable (it is sealed again later)
         if ($script:SecOn) { try { $skip += @(@((Read-VaultState).open) | ForEach-Object { [WildcardPattern]::Escape((Split-Path $_.plain -Leaf)) }) } catch { } }
-        $r = Lock-GuardTree -Folder $f.path -User $User -Skip $skip -ShouldStop $stop
+        $r = Lock-GuardTree -Folder $f.path -User $User -Skip $skip -ShouldStop $stop -SkipPaths @($f.editItems)
         if ($r.Stopped) { return $false }
     }
     return $true
@@ -166,6 +170,8 @@ while ($true) { try {
         foreach ($f in $cfg.folders) {
             $o = $was[$f.path]
             if (-not $o -or ($o.editing -and -not $f.editing)) { $todo += $f.path }
+            # items that left  edit <name>  (resume): lock them again
+            elseif (@($o.editItems | Where-Object { @($f.editItems) -notcontains $_ }).Count) { $todo += $f.path }
         }
         # stopped early (config changed again) -> next tick reloads, then a full check catches up
         if ($todo.Count -and -not (Lock-Folders $cfg $todo)) { $needFull = $true; continue }
@@ -177,6 +183,7 @@ while ($true) { try {
         foreach ($f in $cfg.folders) { if ($p.StartsWith($f.path + '\', [StringComparison]::OrdinalIgnoreCase)) { $folder = $f; break } }
         if (-not $folder) { continue }
         if ($folder.editing) { continue }
+        if (Test-GuardUnderAny $p @($folder.editItems)) { continue }   # unlocked with  edit <name>
         $skip = @(); if ($folder.skip) { $skip = @($folder.skip) }
         if ($script:SecOn) {
             # Security Vault: new files are sealed (next 5-second tick), never just locked;

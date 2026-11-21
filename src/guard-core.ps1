@@ -392,18 +392,31 @@ function Get-GuardSubfolders {
     return Get-ChildItem -LiteralPath $Folder -Recurse -Directory -Force -ErrorAction SilentlyContinue
 }
 
+function Test-GuardUnderAny([string]$Path, [string[]]$List) {
+    # true if $Path is one of $List or inside one of them (edit <name>: what stays unlocked)
+    foreach ($p in @($List)) {
+        if (-not $p) { continue }
+        $q = $p.TrimEnd('\')
+        if ($Path -ieq $q -or $Path.StartsWith($q + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 function Lock-GuardTree {
     # Lock the folder, the folder above, every subfolder and every file. Returns counts + the not-locked list.
     # -ShouldStop: checked before every item; returning $true stops early (background guard: config changed).
-    param([string]$Folder, [string]$User, [string[]]$Skip = @(), [scriptblock]$ShouldStop = $null)
+    # -SkipPaths: files / subfolders unlocked with  edit <name>: left as they are, with all inside
+    param([string]$Folder, [string]$User, [string[]]$Skip = @(), [scriptblock]$ShouldStop = $null, [string[]]$SkipPaths = @())
     $folderRes = Lock-GuardFolder -Folder $Folder -User $User
     $locked = 0; $waiting = @(); $skipped = 0; $failed = @(); $stopped = $false
     foreach ($d in (Get-GuardSubfolders -Folder $Folder)) {
         if ($ShouldStop -and (& $ShouldStop)) { $stopped = $true; break }
+        if (Test-GuardUnderAny $d.FullName $SkipPaths) { continue }
         Lock-GuardSubfolder -Path $d.FullName -User $User | Out-Null
     }
     foreach ($f in (Get-GuardFiles -Folder $Folder)) {
         if ($stopped -or ($ShouldStop -and (& $ShouldStop))) { $stopped = $true; break }
+        if (Test-GuardUnderAny $f.FullName $SkipPaths) { $skipped++; continue }
         $r = Lock-GuardFile -Path $f.FullName -User $User -Skip $Skip
         switch ($r.State) {
             'locked'  { $locked++ }

@@ -34,7 +34,15 @@ Check "godaddy-dns.png gone"         (-not (Test-Path (Join-Path $shots 'godaddy
 
 Write-Host "`n== edit unlocks, resume re-locks ==" -ForegroundColor Cyan
 $o = Invoke-GuardCommand "edit todo" 6>&1 | Out-String
-Check "edit <unknown word>: unlocks nothing" (($o -match 'nothing was unlocked') -and -not (TryDelete (Join-Path $shots 'amazon-checkout.png')))
+Check "edit <no match>: unlocks nothing" (($o -match 'nothing was unlocked') -and -not (TryDelete (Join-Path $shots 'amazon-checkout.png')))
+$o = Invoke-GuardCommand "edit gumroad" 6>&1 | Out-String
+Check "edit <name>: says what it unlocked" ($o -match 'unlocked\s+gumroad-settings\.png')
+Check "edit <name>: saved for the background guard" (@((Cur).editItems) -contains (Join-Path $shots 'gumroad-settings.png'))
+Check "edit <name>: the rest stays locked" (-not (TryDelete (Join-Path $shots 'amazon-checkout.png')))
+Check "edit <name>: that file unlocked" (-not (Test-ItemLocked (Join-Path $shots 'gumroad-settings.png')))
+Invoke-GuardCommand "resume" | Out-Null
+Check "resume: edit <name> list cleared" (@((Cur).editItems).Count -eq 0)
+Check "resume: that file locked again" (Test-ItemLocked (Join-Path $shots 'gumroad-settings.png'))
 Invoke-GuardCommand "edit" | Out-Null
 Check "after edit, file deletable"   (TryDelete (Join-Path $shots 'amazon-checkout.png'))
 Invoke-GuardCommand "resume" | Out-Null
