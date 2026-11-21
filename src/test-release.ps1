@@ -48,12 +48,12 @@ try {
 
     Write-Host "`n== no key, offline ==" -ForegroundColor Cyan
     $d = Use-Release 'good'
-    $env:GUARD_RELEASE_KEY = ''
+    $env:GUARD_RELEASE_KEY = ''; $codeKey = $script:GuardReleaseKey; $script:GuardReleaseKey = ''   # (the code has the real key now)
     $lg = Use-Release 'legacy'; New-Item -ItemType Directory "$lg\main\src" -Force | Out-Null
     [IO.File]::WriteAllText("$lg\main\src\guard-core.ps1", "`$script:GuardVersion = '7.7'")
     $r = Get-GuardRelease
     Check 'no release key yet: main as it is, marked unsigned' ($r.Ok -and $r.Release.unsigned -and $r.Release.version -eq '7.7' -and $r.Release.commit -eq 'main')
-    $env:GUARD_RELEASE_KEY = $key
+    $env:GUARD_RELEASE_KEY = $key; $script:GuardReleaseKey = $codeKey
     $d = Use-Release 'good'
     Check 'with a key: the same main without a signed list is refused' (-not (Get-GuardRelease).Release.unsigned)
     $env:GUARD_RELEASE_URL = ([Uri](Join-Path $tmp 'nothing-here')).AbsoluteUri
@@ -73,6 +73,8 @@ try {
     $sj = Start-Job { param($f, $d) powershell -NoProfile -ExecutionPolicy Bypass -File $f -SignRepo $d *>&1 | Out-String; "exit $LASTEXITCODE" } -ArgumentList "$PSScriptRoot\guard-sign.ps1", $nr
     $so = ''; if (Wait-Job $sj -Timeout 60) { $so = (Receive-Job $sj) -join "`n" } else { Stop-Job $sj }; Remove-Job $sj -Force
     Check 'signer answers: not a git repo, exit 1' (($so -match 'not a git repo') -and ($so -match 'exit 1'))
+    # $script:R is the repo folder; a $r = ... in the script would overwrite it (names ignore case)
+    Check 'signer never overwrites its repo folder variable' (-not ([IO.File]::ReadAllText("$PSScriptRoot\guard-sign.ps1") -match '(?i)(?<!script:)\$r\s*='))
 } finally {
     $env:GUARD_RELEASE_URL = ''; $env:GUARD_RELEASE_KEY = ''
     Remove-Item $tmp -Recurse -Force -EA SilentlyContinue

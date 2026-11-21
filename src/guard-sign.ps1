@@ -208,8 +208,9 @@ try {
     Say 'a window asks for administrator, then shows what it signs: check it, type YES and your PIN.'
     $p = Start-Process $ps -Verb RunAs -PassThru -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$signer`" -SignCommit $sha -SignOut `"$($script:R)`""
     if ($p.ExitCode) { throw 'not signed (see the signing window). nothing was published.' }
-    $r = Read-GuardRelease ([IO.File]::ReadAllBytes($rj)) ([Convert]::FromBase64String(([IO.File]::ReadAllText((Join-Path $script:R 'release.sig'))).Trim())) $keys[0]
-    if ($r.commit -ne $sha) { throw 'the signed list is for another commit' }
+    # ($signed, not $r: names ignore case, and $r is $script:R, the repo folder)
+    $signed = Read-GuardRelease ([IO.File]::ReadAllBytes($rj)) ([Convert]::FromBase64String(([IO.File]::ReadAllText((Join-Path $script:R 'release.sig'))).Trim())) $keys[0]
+    if ($signed.commit -ne $sha) { throw 'the signed list is for another commit' }
     Git add release.json release.sig | Out-Null; Git commit -q -m "release $ver" | Out-Null
     Git push -q origin main | Out-Null
     Say ("guard {0} is released - signed commit {1}" -f $ver, $sha.Substring(0, 10)) 'Green'
