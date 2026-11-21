@@ -18,7 +18,7 @@ if (-not $User) { try { $User = Get-GuardUser } catch { } }
 $dataDir    = Split-Path $script:GuardConfigPath -Parent
 $statusFile = Join-Path $dataDir 'watch-status.json'
 $errorFile  = Join-Path $dataDir 'watch-error.log'
-$script:LastFull = $null; $script:LastLock = $null; $script:Latest = $null; $script:LoadedSaved = $null
+$script:LastFull = $null; $script:LastLock = $null; $script:Latest = $null; $script:LoadedSaved = $null; $script:SecOn = $false
 
 # any crash: write down why (guard shows STOPPED; the task restarts us), then end
 trap {
@@ -93,6 +93,8 @@ function Lock-Folders($cfg, $paths) {
         if ($f.editing) { continue }
         if (-not (Test-Path -LiteralPath $f.path)) { continue }
         $skip = @(); if ($f.skip) { $skip = @($f.skip) }
+        # Security Vault: a file unlocked right now must stay changeable (it is sealed again later)
+        if ($script:SecOn) { try { $skip += @(@((Read-VaultState).open) | ForEach-Object { [WildcardPattern]::Escape((Split-Path $_.plain -Leaf)) }) } catch { } }
         $r = Lock-GuardTree -Folder $f.path -User $User -Skip $skip -ShouldStop $stop
         if ($r.Stopped) { return $false }
     }
@@ -101,7 +103,10 @@ function Lock-Folders($cfg, $paths) {
 
 function Full-Check($cfg) {
     Expire-Edits $cfg | Out-Null
+    $script:SecOn = Test-SecurityOn
     $done = Lock-Folders $cfg $null
+    # Security Vault: any real file found in a protected folder is sealed
+    if ($done -and $script:SecOn) { try { [void](Invoke-SecureTick -User $User -Cfg $cfg -Full) } catch { } }
     if ($done) { $script:LastFull = (Get-Date).ToString('o'); Write-WatchStatus 'full check done' }
     return $done
 }
@@ -140,7 +145,8 @@ function Start-Watchers($cfg) {
 Start-Watchers $cfg
 Write-WatchStatus "watching $($script:Watchers.Count) folders"
 
-$tick = 0.7; $sinceSweep = 0.0; $sinceBeat = 0.0
+$tick = 0.7; $sinceSweep = 0.0; $sinceBeat = 0.0; $sinceSecure = 0.0
+$script:SecureNew = @(); $script:LogonAt = $null; $script:LogonCheckedAt = [datetime]::MinValue
 $sinceUpdate = 21600.0 - 60   # first update check one minute after start, then every 6 hours
 while ($true) { try {
     Start-Sleep -Milliseconds 700
@@ -172,6 +178,13 @@ while ($true) { try {
         if (-not $folder) { continue }
         if ($folder.editing) { continue }
         $skip = @(); if ($folder.skip) { $skip = @($folder.skip) }
+        if ($script:SecOn) {
+            # Security Vault: new files are sealed (next 5-second tick), never just locked;
+            # a new subfolder still can't be deleted
+            if (Test-Path -LiteralPath $p -PathType Container) { Lock-GuardSubfolder -Path $p -User $User | Out-Null }
+            $script:SecureNew += $p
+            continue
+        }
         if (Test-Path -LiteralPath $p -PathType Container) {
             # new or renamed-in subfolder: lock it and anything already inside
             Lock-GuardSubfolder -Path $p -User $User | Out-Null
@@ -197,15 +210,27 @@ while ($true) { try {
         Write-WatchStatus 'update check'
     }
 
-    $sinceBeat += $tick
-    if ($sinceBeat -ge 30) {
-        $sinceBeat = 0
-        # vault files opened over 30 minutes ago, or before this sign-in: saved back and locked
-        $lt = Get-LogonTime; if (-not $lt) { $lt = [datetime]::MinValue }
-        try { if ((Invoke-GuardVaultAutoClose -User $User -Since $lt) -gt 0) { Write-WatchStatus 'vault closed' } }
-        catch { try { "{0:o}  vault auto-close: {1}`r`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace | Add-Content -LiteralPath $errorFile } catch { } }
-        Write-WatchStatus 'alive'
+    # Security Vault, every 5 seconds: unlocked files sealed copy updated, old ones locked again
+    # (15 minutes after opening, once no program uses them, or opened before this sign-in),
+    # new files sealed
+    $sinceSecure += $tick
+    if ($sinceSecure -ge 5) {
+        $sinceSecure = 0
+        try {
+            $script:SecOn = Test-SecurityOn
+            if ($script:SecOn) {
+                if (-not $script:LogonAt -or ((Get-Date) - $script:LogonCheckedAt).TotalSeconds -ge 60) { $script:LogonAt = Get-LogonTime; $script:LogonCheckedAt = Get-Date }
+                $lt = $script:LogonAt; if (-not $lt) { $lt = [datetime]::MinValue }
+                $np = @($script:SecureNew | Select-Object -Unique); $script:SecureNew = @()
+                if (Invoke-SecureTick -User $User -Cfg $cfg -Since $lt -NewPaths $np) { $script:SecureNew += @($script:SecureLater) }
+                else { $script:SecureNew += $np }   # guard's window is working: next time
+                Write-GuardBadges -Config $cfg
+            }
+        } catch { try { "{0:o}  security vault: {1}`r`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace | Add-Content -LiteralPath $errorFile } catch { } }
     }
+
+    $sinceBeat += $tick
+    if ($sinceBeat -ge 30) { $sinceBeat = 0; Write-WatchStatus 'alive' }
 
     # every 5 minutes: lock anything missed (a file still open earlier, a missed event)
     $sinceSweep += $tick

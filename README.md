@@ -43,25 +43,30 @@ orange lock = unlocked for editing, red ! = partly locked.
 
 For secrets (passwords, documents nobody may read):
 
-    vault <path>
+    security vault on
 
-The folder moves into the vault: every file is encrypted, owned by
-a hidden switched-off account, and nobody (you, Explorer, AI agents,
-other programs) can read it. An administrator who takes the files
-gets scrambled bytes. The key is kept by this PC's TPM chip and
-only works with your guard PIN; a recovery code on paper is the way
-back on a new PC.
+Asks for your PIN once (the first time you choose it and get a
+recovery code for paper). Then every protected folder is sealed:
+each file is encrypted and kept where only guard can reach it, and
+an empty placeholder with the same name stays in its place, with a
+blue shield badge. Nobody (you, Explorer, AI agents, other
+programs, even an administrator) can read a sealed file without the
+PIN. New files you save there are sealed by themselves.
 
-    open <name>      PIN, then only that file or folder is normal again
-    close            save changes back, lock it again (or wait 30 minutes)
-    unvault <name>   take a folder out for good
+To use a file: right-click it, Unlock with guard, Yes, PIN. Only
+that file comes back. Every change is sealed within 5 seconds, and
+it locks again by itself 15 minutes after you opened it (once no
+program uses it) and at every sign-in.
 
-While a file is open, programs you run can read that one file.
-Don't open vault files with an AI agent running.
+    security vault off   PIN, then every file is a normal one again
+
+While a file is unlocked, programs you run can read that one file.
+Don't unlock files with an AI agent running.
 
 Inside guard:
 - delete <name>  delete something on purpose
 - edit / resume  unlock for a while / lock again
+- security vault on / off   seal / unseal every protected folder
 - check          this PC's safety settings (check fix, check account)
 - help           every command
 - Tab            completes commands, file names and paths

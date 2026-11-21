@@ -278,47 +278,59 @@ public static class Inj {
         . "$src\guard-shell.ps1"; $ErrorActionPreference = 'Continue'
         $user = $me.Name; $script:Cfg = New-GuardConfig   # ($script:User is $user: names ignore case)
         function VQ { $script:InputQueue = New-Object System.Collections.Queue; foreach ($x in $args) { $script:InputQueue.Enqueue([string]$x) } }
-        $vs = Join-Path $work 'VaultMe'; New-Item -ItemType Directory $vs -Force | Out-Null
-        Set-Content "$vs\secret.txt" 'TOPSECRET-redteam'; $sh = Get-VaultFileHash "$vs\secret.txt"
+        $vs = Join-Path $work 'VaultMe'; New-Item -ItemType Directory "$vs\inner" -Force | Out-Null
+        Set-Content "$vs\secret.txt" 'TOPSECRET-redteam'; Set-Content "$vs\inner\other.txt" 'TOPSECRET-other'; $sh = Get-VaultFileHash "$vs\secret.txt"
+        [void](Invoke-GuardCommand "init `"$vs`"" 6>&1 | Out-String)   # a normally protected folder first
+        Check 'the folder is protected (init)' (@($script:Cfg.folders).Count -eq 1)
         $vpin = 'rt-pin-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
         VQ $vpin $vpin $env:GUARD_VAULT_CODE
-        Check 'a folder goes into the vault (real chip, hidden account)' ((Invoke-GuardCommand "vault `"$vs`"" 6>&1 | Out-String -Width 400) -cmatch 'Folder is in the Vault\.')
-        $vst = Read-VaultState; $vv = @($vst.vaults)[0]; $gv = @(Get-VaultEntries $vv)[0].Gv; $vroot = $env:GUARD_VAULT_ROOT
+        Check 'security vault on (real chip, hidden account)' ((Invoke-GuardCommand 'security vault on' 6>&1 | Out-String -Width 400) -cmatch 'Security Vault is On\.')
+        $vst = Read-VaultState; $vv = Get-SecureVault $vst $vs; $gv = Get-SecureGv $vv 'secret.txt'; $vroot = $env:GUARD_VAULT_ROOT
         # ($( ) around try / if: a statement can't be piped on its own)
         $r = Run-As Limited ("`$(try { Get-ChildItem -LiteralPath '$vroot' -Recurse -EA Stop | Out-Null; 'list: allowed' } catch { 'list: denied' }) | Add-Content `$log`n" +
             "`$(try { [void][IO.File]::ReadAllBytes('$gv'); 'read: allowed' } catch { 'read: denied' }) | Add-Content `$log`n" +
             "`$(try { Copy-Item -LiteralPath '$gv' '$work\stolen.gv' -EA Stop; 'copy: allowed' } catch { 'copy: denied' }) | Add-Content `$log`n" +
             "`$(try { Remove-Item -LiteralPath '$gv' -Force -EA Stop; 'delete: allowed' } catch { 'delete: denied' }) | Add-Content `$log`n" +
             "& icacls '$vroot' /setowner '$user' *> `$null; `$(if (`$LASTEXITCODE) { 'owner: denied' } else { 'owner: allowed' }) | Add-Content `$log`n" +
-            "& icacls '$vroot' /grant '${user}:F' *> `$null; `$(if (`$LASTEXITCODE) { 'grant: denied' } else { 'grant: allowed' }) | Add-Content `$log")
+            "& icacls '$vroot' /grant '${user}:F' *> `$null; `$(if (`$LASTEXITCODE) { 'grant: denied' } else { 'grant: allowed' }) | Add-Content `$log`n" +
+            "`$(try { [IO.File]::WriteAllText('$vs\secret.txt', 'planted'); 'placeholder write: allowed' } catch { 'placeholder write: denied' }) | Add-Content `$log`n" +
+            "`$(try { Remove-Item -LiteralPath '$vs\secret.txt' -Force -EA Stop; 'placeholder delete: allowed' } catch { 'placeholder delete: denied' }) | Add-Content `$log`n" +
+            "`$(try { Rename-Item -LiteralPath '$vs\secret.txt' 'renamed.txt' -EA Stop; 'placeholder rename: allowed' } catch { 'placeholder rename: denied' }) | Add-Content `$log`n" +
+            "'placeholder text: ' + `$(try { [IO.File]::ReadAllText('$vs\secret.txt') -match 'TOPSECRET' } catch { `$false }) | Add-Content `$log")
         Info ("attacker: " + ($r -join ' | '))
-        foreach ($w in 'list', 'read', 'copy', 'delete', 'owner', 'grant') { Check "without admin: $w the vault - refused" ($r -contains "${w}: denied") }
-        Check 'the locked file is still there' (Test-Path -LiteralPath $gv)
+        foreach ($w in 'list', 'read', 'copy', 'delete', 'owner', 'grant') { Check "without admin: $w the sealed copies - refused" ($r -contains "${w}: denied") }
+        foreach ($w in 'write', 'delete', 'rename') { Check "without admin: $w the placeholder - refused" ($r -contains "placeholder ${w}: denied") }
+        Check 'the placeholder holds nothing to read' ($r -contains 'placeholder text: False')
+        Check 'the sealed copy is still there' (Test-Path -LiteralPath $gv)
         $r = Run-As Highest ("`$(try { `$b = [IO.File]::ReadAllBytes('$gv'); 'admin read: ' + `$b.Length + ' bytes, readable text: ' + ([Text.Encoding]::ASCII.GetString(`$b) -match 'TOPSECRET') } catch { 'admin read: denied' }) | Add-Content `$log")
         Info ("administrator: " + ($r -join ' | '))
         Check 'an administrator without the PIN gets only scrambled bytes' (($r -match 'readable text: False') -or ($r -contains 'admin read: denied'))
-        # a link planted where open will write: guard (admin) must not follow it
-        $target = Join-Path $work 'admin-only'; New-Item -ItemType Directory $target -Force | Out-Null
-        $r = Run-As Limited ("cmd /c mklink /J `"$vs`" `"$target`" | Out-Null; `$(if (Test-Path '$vs') { 'link: made' } else { 'link: refused' }) | Add-Content `$log")
+        # a link planted inside a sealed folder, to an admin-only folder: the sweep must not seal or wipe what is there
+        $target = Join-Path $work 'admin-only'; New-Item -ItemType Directory $target -Force | Out-Null; Set-Content "$target\victim.txt" 'VICTIM-untouched'
+        $r = Run-As Limited ("cmd /c mklink /J `"$vs\j`" `"$target`" | Out-Null; `$(if (Test-Path '$vs\j') { 'link: made' } else { 'link: refused' }) | Add-Content `$log")
         if ($r -contains 'link: made') {
-            VQ $vpin; $o = Invoke-GuardCommand 'open secret' 6>&1 | Out-String -Width 400
-            Check 'a link planted at the folder: open refuses to write through it' (($o -match 'is a link') -and -not (Get-ChildItem $target -Force))
-            cmd /c rmdir "$vs" | Out-Null
-        } else { Info 'a program without admin rights could not even make the link'; Check 'a link planted at the folder: not possible' $true }
-        # an open copy swapped for a link to a Windows file: close must not read that file into the vault
-        VQ $vpin; Invoke-GuardCommand 'open secret' 6>&1 | Out-Null
-        Check 'open: secret.txt is back' (Test-Path "$vs\secret.txt")
-        $win = Join-Path (Get-GuardWindowsDir) 'win.ini'
+            [void](Invoke-SecureTick -User $user -Cfg $script:Cfg -Full)
+            Check 'a link inside a sealed folder: what it points to is never sealed or wiped' ((Get-Content "$target\victim.txt" -Raw) -match 'VICTIM-untouched')
+            cmd /c rmdir "$vs\j" | Out-Null
+        } else { Info 'a program without admin rights could not even make the link'; Check 'a link inside a sealed folder: not possible' $true }
+        # unlock, then the unlocked file swapped for a hard link to a Windows file
+        VQ $vpin; [void](Invoke-SecurityUnlock "$vs\secret.txt" 6>&1 | Out-String)
+        Check 'unlock: secret.txt is real again' ((Get-Content "$vs\secret.txt" -Raw) -match 'TOPSECRET-redteam')
+        Check 'unlock: only that file' ((Get-Item "$vs\inner\other.txt").Length -eq 0)
+        $win = Join-Path (Get-GuardWindowsDir) 'win.ini'; $winHash = Get-VaultFileHash $win
         $r = Run-As Limited ("Remove-Item -LiteralPath '$vs\secret.txt' -Force; `$(try { New-Item -ItemType HardLink -Path '$vs\secret.txt' -Target '$win' -EA Stop | Out-Null; 'hardlink: made' } catch { 'hardlink: refused' }) | Add-Content `$log")
         Info ("attacker: " + ($r -join ' | '))
-        Invoke-GuardCommand 'close' 6>&1 | Out-Null
+        [void](Update-VaultState { param($st) foreach ($i in $st.open) { $i.at = (Get-Date).AddMinutes(-16).ToString('o') } })
+        [void](Invoke-SecureTick -User $user -Cfg $script:Cfg)
+        [void](Invoke-SecureTick -User $user -Cfg $script:Cfg -Full)
+        Check 'the Windows file the link pointed to is untouched' ((Get-VaultFileHash $win) -eq $winHash)
         $k = Open-VaultKeys (Read-VaultState) $vpin
-        $now = Read-VaultFile (@(Get-VaultEntries $vv | Where-Object { $_.Rel -eq 'secret.txt' })[0].Gv) $null $k.Priv
-        Check 'close: a file that is not yours (a link to a Windows file) is never read into the vault' ($now -eq $sh)
-        if (Test-Path "$vs\secret.txt") { Remove-Item -LiteralPath "$vs\secret.txt" -Force -EA SilentlyContinue }
-        Check 'after close nothing readable is left at the folder' (-not (Test-Path "$vs\secret.txt"))
-        VQ 'YES' $vpin
-        Check 'unvault: back to a normal folder' ((Invoke-GuardCommand 'unvault VaultMe' 6>&1 | Out-String -Width 400) -cmatch 'Folder is out of the Vault\.')
+        Check 'the sealed copy is still the real secret, never the Windows file' ((Read-VaultFile $gv $null $k.Priv) -eq $sh)
+        if ((Test-Path "$vs\secret.txt") -and (Get-Item "$vs\secret.txt").Length -gt 0) { Remove-Item -LiteralPath "$vs\secret.txt" -Force -EA SilentlyContinue }   # (only the link's name)
+        VQ $vpin
+        Check 'security vault off: back to normal files' ((Invoke-GuardCommand 'security vault off' 6>&1 | Out-String -Width 400) -cmatch 'Security Vault is Off\.')
+        Check 'the secret came back from the sealed copy' ((Get-Content "$vs\secret.txt" -Raw) -match 'TOPSECRET-redteam')
+        VQ '1'; [void](Invoke-GuardCommand 'remove' 6>&1 | Out-String)
     } catch { Check ('vault attack section ran: ' + $_.Exception.Message) $false }
     finally {
         try { Remove-GuardVaultSystem | Out-Null } catch { }

@@ -425,51 +425,65 @@ Check 'GitHub unreachable/missing: update says so, no crash' ((Out-Of 'update') 
 $env:GUARD_RELEASE_URL = ([Uri](Join-Path $relRoot 'v11')).AbsoluteUri   # reinstall later: 1.1
 
 # ---------------------------------------------------------------------------
-Section 'vault: the real TPM chip, a hidden owner account, the background guard closes by itself'
+Section 'Security Vault: real TPM chip, hidden owner account, placeholders, the background guard (SYSTEM)'
 $vid = [guid]::NewGuid().ToString('N').Substring(0, 6)
-$env:GUARD_VAULT_ROOT = Join-Path $root 'guard-vault'; $env:GUARD_VAULT_ACCOUNT = "gv-$vid"; $env:GUARD_VAULT_KEYNAME = "guard-vault-e2e-$vid"
+$env:GUARD_VAULT_ROOT = Join-Path $root 'guard-sv'; $env:GUARD_VAULT_ACCOUNT = "gv-$vid"; $env:GUARD_VAULT_KEYNAME = "guard-vault-e2e-$vid"
 $env:GUARD_VAULT_CODE = '24680-13579-24680-13579-24680-13579'
-$vs = Join-Path $root 'Vaulted'; New-Item -ItemType Directory "$vs\inner" -Force | Out-Null
-Set-Content "$vs\tax.txt" 'TOPSECRET-e2e-tax'; Set-Content "$vs\inner\bank.txt" 'TOPSECRET-e2e-bank'
-$taxHash = (Get-FileHash "$vs\tax.txt" -Algorithm SHA256).Hash
+$badgeFile = "$env:ProgramData\guard\badges.txt"
+$menuKey = 'SOFTWARE\Classes\*\shell\guard-unlock\command'
+function Menu-Cmd { $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($menuKey); if (-not $k) { return $null }; try { [string]$k.GetValue('') } finally { $k.Close() } }
+function Size($p) { (Get-Item -LiteralPath $p -Force).Length }
+Set-Content "$A\marker.txt" 'TOPSECRET-e2e-marker'
+[void](WaitFor { IsLocked "$A\marker.txt" } 20)
+$markerHash = Get-VaultFileHash "$A\marker.txt"
 $vpin = 'e2e-pin-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 try {
-    Q $vpin $vpin $env:GUARD_VAULT_CODE; $o = Out-Of "vault `"$vs`""; Write-Host $o -ForegroundColor DarkGray
-    Check 'vault: Folder is in the Vault.' ($o -cmatch 'Folder is in the Vault\.')
-    Check 'vault: the normal folder is gone' (-not (Test-Path $vs))
-    $vst = Read-VaultState; $vv = @($vst.vaults)[0]; $ents = @(Get-VaultEntries $vv)
-    Check 'vault: the chip key is a real TPM machine key' ([Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)))
+    Q $vpin $vpin $env:GUARD_VAULT_CODE; $o = Out-Of 'security vault on'; Write-Host $o -ForegroundColor DarkGray
+    Check 'security vault on: Security Vault is On.' ($o -cmatch 'Security Vault is On\.')
+    Check 'it never says where the files went' ($o -notmatch [regex]::Escape($env:GUARD_VAULT_ROOT))
+    Check 'every file is an empty placeholder with its name' ((Size "$A\marker.txt") -eq 0 -and (Size "$A\amazon-checkout.png") -eq 0 -and (Size "$B2\invoice.pdf") -eq 0)
+    $wdeny = @((Get-Acl "$A\marker.txt").Access | Where-Object { $_.AccessControlType -eq 'Deny' -and $_.IdentityReference -match 'ojhas' -and $_.FileSystemRights.ToString() -match 'Write' })
+    Check 'a placeholder can not be written into, nor deleted' ($wdeny.Count -and (IsLocked "$A\marker.txt"))
+    $vst = Read-VaultState; $vv = Get-SecureVault $vst $A; $ents = @(Get-VaultEntries $vv)
+    Check 'the chip key is a real TPM machine key' ([Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)))
     $acc = Get-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue
-    Check 'vault: the hidden owner account exists and is switched off' ($acc -and -not $acc.Enabled)
-    Check 'vault: every locked file is owned by that account' (@($ents | Where-Object { (Get-Acl $_.Gv).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $vst.ownerSid }).Count -eq 0 -and $ents.Count -eq 2)
-    $aces = @((Get-Acl (Get-VaultDir $vv)).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Select-Object -Unique)
-    Check 'vault: only SYSTEM, administrators and the owner account in its permissions' (@($aces | Where-Object { @('S-1-5-18', 'S-1-5-32-544', $vst.ownerSid) -notcontains $_ }).Count -eq 0)
-    Check 'vault: no readable text in the locked files' (-not ($ents | Where-Object { [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.Gv)) -match 'TOPSECRET' }))
-    Check 'uninstall refused while a folder is in the vault' (((Out-Of 'uninstall') -match 'unvault all  first') -and (Test-Path $prefix))
-    Q $vpin; $o = Out-Of 'open tax'
-    Check 'open: only tax.txt is back, with the same bytes' ((Test-Path "$vs\tax.txt") -and -not (Test-Path "$vs\inner\bank.txt") -and (Get-FileHash "$vs\tax.txt" -Algorithm SHA256).Hash -eq $taxHash)
-    Check 'open: the open copy is yours' ((OwnerOf "$vs\tax.txt") -match 'ojhas')
-    Update-VaultState { param($st) foreach ($i in $st.open) { $i.at = (Get-Date).AddMinutes(-40).ToString('o') } }
-    $ac = WaitFor { -not (Test-Path "$vs\tax.txt") -and -not @((Read-VaultState).open).Count } 90
-    Check 'the background guard (SYSTEM) closes it after 30 minutes' $ac
-    if (-not $ac) {
-        Write-Host ("      plain still there: {0}  open items: {1}" -f (Test-Path "$vs\tax.txt"), @((Read-VaultState).open).Count) -ForegroundColor DarkGray
-        Write-Host ("      watcher status: " + (Get-Content "$env:ProgramData\guard\watch-status.json" -Raw -EA SilentlyContinue)) -ForegroundColor DarkGray
+    Check 'the hidden owner account exists and is switched off' ($acc -and -not $acc.Enabled)
+    Check 'every sealed copy is owned by that account' ($ents.Count -gt 3 -and @($ents | Where-Object { (Get-Acl $_.Gv).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $vst.ownerSid }).Count -eq 0)
+    $aces = @((Get-Acl $env:GUARD_VAULT_ROOT).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Select-Object -Unique)
+    Check 'only SYSTEM, administrators and that account in its permissions' (@($aces | Where-Object { @('S-1-5-18', 'S-1-5-32-544', $vst.ownerSid) -notcontains $_ }).Count -eq 0)
+    Check 'the sealed place is hidden' ((Get-Item -LiteralPath $env:GUARD_VAULT_ROOT -Force).Attributes -match 'Hidden')
+    Check 'no readable text in the sealed copies' (-not ($ents | Where-Object { [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($_.Gv)) -match 'TOPSECRET' }))
+    Check 'Explorer right-click "Unlock with guard" starts the installed guard' (((Menu-Cmd) -match [regex]::Escape("$prefix\guard.ps1")) -and ((Menu-Cmd) -match '-Unlock "%1"'))
+    Check 'badges: the blue shield on the protected folders' ((Get-Content $badgeFile) -contains "sealed|$A")
+    Check 'uninstall refused while it is on' (((Out-Of 'uninstall') -match 'security vault off  first') -and (Test-Path $prefix))
+    Check 'edit paused while it is on' ((Out-Of 'edit') -match 'security vault off  first')
+    Q $vpin; $o = (Invoke-SecurityUnlock "$A\marker.txt" 6>&1 | Out-String)
+    Check 'unlock: the real file is back, the same bytes, yours, not locked' (((Get-VaultFileHash "$A\marker.txt") -eq $markerHash) -and ((OwnerOf "$A\marker.txt") -match 'ojhas') -and -not (IsLocked "$A\marker.txt"))
+    Check 'unlock: only that file' ((Size "$A\amazon-checkout.png") -eq 0)
+    Check 'unlocked: orange badge line' ((Get-Content $badgeFile) -contains "unsealed|$A\marker.txt")
+    Set-Content "$A\marker.txt" 'TOPSECRET-e2e-marker-changed'; $newHash = Get-VaultFileHash "$A\marker.txt"
+    Check 'the background guard seals the change within seconds' (WaitFor { (@((Read-VaultState).open) | Where-Object { $_.plain -eq "$A\marker.txt" }).hash -eq $newHash } 30)
+    [void](Update-VaultState { param($st) foreach ($i in $st.open) { $i.at = (Get-Date).AddMinutes(-16).ToString('o') } })
+    Check 'the background guard locks it again 15 minutes after opening' (WaitFor { (Size "$A\marker.txt") -eq 0 -and -not @((Read-VaultState).open).Count } 45)
+    Set-Content "$A\later.txt" 'TOPSECRET-e2e-later'
+    Check 'a new file in a protected folder is sealed by the background guard' (WaitFor { (Test-Path "$A\later.txt") -and (Size "$A\later.txt") -eq 0 } 45)
+    if (-not (Test-Path "$A\later.txt") -or (Size "$A\later.txt") -gt 0 -or (Size "$A\marker.txt") -gt 0) {
         Get-Content "$env:ProgramData\guard\watch-error.log" -Tail 12 -EA SilentlyContinue | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-        Update-VaultState { param($st) $st.open = @() }; Remove-Item "$vs\tax.txt" -Force -EA SilentlyContinue   # so the rest of the test can go on
     }
-    Check 'still 2 files in the vault after the auto-close' (@(Get-VaultEntries $vv).Count -eq 2)
-    Q 'YES' $vpin; $o = Out-Of 'unvault Vaulted'
-    Check 'unvault: Folder is out of the Vault.' ($o -cmatch 'Folder is out of the Vault\.')
-    Check 'unvault: every file back, yours' ((Get-Content "$vs\inner\bank.txt" -Raw) -match 'TOPSECRET-e2e-bank' -and (OwnerOf "$vs\tax.txt") -match 'ojhas')
+    Q $vpin; $o = Out-Of 'security vault off'; Write-Host $o -ForegroundColor DarkGray
+    Check 'security vault off: Security Vault is Off.' ($o -cmatch 'Security Vault is Off\.')
+    Check 'every file back, with its last change' (((Get-Content "$A\marker.txt" -Raw) -match 'marker-changed') -and ((Get-Content "$A\later.txt" -Raw) -match 'e2e-later') -and (Size "$A\amazon-checkout.png") -gt 0 -and (Size "$B2\invoice.pdf") -gt 0)
+    Check 'back under normal protection' ((IsLocked "$A\marker.txt") -and (IsLocked "$A\later.txt") -and (IsLocked "$A\amazon-checkout.png"))
+    Check 'the right-click entry is gone' ($null -eq (Menu-Cmd))
+    Check 'badges: the normal lock again' (-not ((Get-Content $badgeFile) -match '^(sealed|unsealed)\|'))
 } finally {
+    try { if (Test-SecurityOn) { Q $vpin; Out-Of 'security vault off' | Out-Null } } catch { }
     if (-not (Test-GuardVaultInUse)) { Remove-GuardVaultSystem | Out-Null }
     Remove-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue
     Remove-VaultChipKey $env:GUARD_VAULT_KEYNAME
 }
-Check 'vault: chip key and owner account removed again' (-not [Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)) -and -not (Get-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue))
+Check 'chip key and owner account removed again' (-not [Security.Cryptography.CngKey]::Exists($env:GUARD_VAULT_KEYNAME, (Get-VaultChipProvider), (Get-VaultChipFlags)) -and -not (Get-LocalUser -Name $env:GUARD_VAULT_ACCOUNT -EA SilentlyContinue))
 foreach ($n in 'GUARD_VAULT_ROOT', 'GUARD_VAULT_ACCOUNT', 'GUARD_VAULT_KEYNAME', 'GUARD_VAULT_CODE') { Set-Item "env:$n" '' }
-Remove-Item -LiteralPath $vs -Recurse -Force -EA SilentlyContinue
 
 # ---------------------------------------------------------------------------
 Section 'check account: an admin account first, then the daily one becomes standard (throwaway test accounts)'

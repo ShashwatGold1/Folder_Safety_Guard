@@ -1,10 +1,14 @@
-# guard-vault.ps1 - the vault: folders nobody can read without the guard PIN.
-#   vault <path>   moves a folder into the vault (PIN; the first time you choose the PIN)
-#   vault          lists the vault folders and what is open
-#   vault pin      changes the PIN
-#   open <name>    PIN, then only that file or folder comes back as a normal one
-#   close [name]   saves changes back into the vault and takes the open copies away again
-#   unvault <name> PIN, then the whole folder becomes a normal folder again
+# guard-vault.ps1 - the Security Vault: protected folders nobody can read without the guard PIN.
+#   security vault on    PIN (the first time: choose it, recovery code for paper). Then every
+#                        protected folder is sealed: each file goes into the vault, checked, and
+#                        an empty placeholder with the same name stays (shield badge, locked).
+#   security vault off   PIN, then every file comes back (still delete-protected as before)
+#   security vault       on or off, how many files are unlocked right now
+#   security vault pin   changes the PIN
+#   right-click a placeholder -> "Unlock with guard": Windows asks Yes, guard asks the PIN, only
+#   that file (or folder) is real again. Every change goes into the vault within 5 seconds; it
+#   locks again 15 minutes after it was opened, once no program uses it, and always at sign-in.
+#   New files in a sealed folder are sealed by themselves. Nothing ever says where the vault is.
 #
 # How it holds:
 #  - every file is encrypted (AES-256 + HMAC-SHA256) with a key of its own. That key is locked
@@ -14,7 +18,7 @@
 #    locked with the recovery code (paper only), for a new PC, a cleared chip or a lost PIN.
 #  - putting a file IN needs only the public half: guard can save changes back (close, and
 #    the background guard's auto-close) without the PIN. Getting one OUT always needs the PIN.
-#  - the encrypted files sit in <drive>:\guard-vault, owned by a hidden, switched-off account
+#  - the encrypted files sit in a hidden folder, owned by a hidden, switched-off account
 #    (guard-vault) that nobody signs in with. Only that account, SYSTEM and administrators may
 #    touch the folder; you, Explorer and every program running as you get "access denied".
 #    An administrator who takes the files anyway gets only scrambled bytes.
@@ -22,7 +26,9 @@
 
 $script:VaultTrusted = @('S-1-5-18', 'S-1-5-32-544')
 $script:VaultMagic = [Text.Encoding]::ASCII.GetBytes('GVF1')
-$script:VaultCloseMin = 30
+$script:VaultCloseMin = 15
+$script:SecureLockMin = 15   # an unlocked file locks again 15 minutes after it was opened (once no program uses it)
+$script:SecureLater = @()
 
 # ---- settings (test overrides only in test mode: see Get-GuardTestEnv) ------------------
 function Test-VaultTestMode { return [bool](Get-GuardTestEnv 'GUARD_VAULT_ROOT') }
@@ -31,9 +37,10 @@ function Get-VaultAccount { $a = Get-GuardTestEnv 'GUARD_VAULT_ACCOUNT'; if ($a)
 function Test-VaultSoftChip { return [bool](Get-GuardTestEnv 'GUARD_VAULT_SOFTCHIP') }
 # tests without admin rights can't set owners: those steps are skipped there (and only there)
 function Test-VaultNoAcl { return ((Test-VaultTestMode) -and -not (Test-GuardAdmin)) }
-function Get-VaultRootFor([string]$Path) {
+function Get-VaultRootFor([string]$Path = '') {
+    # one hidden place for every sealed file (guard never tells the user where it is)
     $r = Get-GuardTestEnv 'GUARD_VAULT_ROOT'; if ($r) { return $r.TrimEnd('\') }
-    return ((Split-Path $Path -Qualifier) + '\guard-vault')
+    return (Join-Path (Get-GuardProgramData) 'guard-sv')
 }
 
 # ---- bytes ------------------------------------------------------------------------------
@@ -138,9 +145,7 @@ function Get-VaultCodeDigits([string]$Code) { return ($Code -replace '[^0-9]', '
 # ---- the state: ProgramData\guard\vault.json, and a copy in every vault folder root ------
 function Read-VaultState {
     $p = Get-VaultStatePath
-    $cands = @($p)
-    if (-not (Test-VaultTestMode)) { foreach ($d in [IO.DriveInfo]::GetDrives()) { if ($d.DriveType -eq 'Fixed') { $cands += (Join-Path $d.RootDirectory.FullName 'guard-vault\vault-keys.json') } } }
-    else { $cands += (Join-Path (Get-VaultRootFor '') 'vault-keys.json') }
+    $cands = @($p, (Join-Path (Get-VaultRootFor) 'vault-keys.json'))
     $best = $null
     foreach ($c in $cands) {
         # (a drive that is locked, or one this account can't read, is skipped, never an error)
@@ -159,7 +164,8 @@ function Read-VaultState {
 function Save-VaultState($S) {
     $S.saved = (Get-Date).ToString('o')
     $json = $S | ConvertTo-Json -Depth 10
-    $targets = @(Get-VaultStatePath) + @($S.vaults | ForEach-Object { Join-Path $_.root 'vault-keys.json' } | Select-Object -Unique)
+    $targets = @(Get-VaultStatePath)
+    if (Test-Path -LiteralPath (Get-VaultRootFor)) { $targets += (Join-Path (Get-VaultRootFor) 'vault-keys.json') }
     foreach ($t in $targets) {
         $d = Split-Path $t -Parent; if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
         $tmp = "$t.tmp"
@@ -167,15 +173,20 @@ function Save-VaultState($S) {
         Move-Item -LiteralPath $tmp -Destination $t -Force
     }
 }
-function Update-VaultState([scriptblock]$Change) {
-    # guard's window and the background guard both change the open list: one at a time
-    $m = $null; $got = $false
-    try { $m = New-Object Threading.Mutex($false, 'Global\guard-vault-state'); try { $got = $m.WaitOne(10000) } catch [Threading.AbandonedMutexException] { $got = $true } } catch { }
+function Update-VaultState([scriptblock]$VaultChange, [switch]$VaultTry) {
+    # guard's window and the background guard both change the files: one at a time.
+    # -VaultTry (the background guard): busy right now = do nothing, returns $false (next tick again)
+    # (odd names: the block runs in here and sees these, so they must not hide the caller's)
+    $vaultMx = $null; $vaultGot = $false
+    $vaultWait = 60000; if ($VaultTry) { $vaultWait = 0 }
+    try { $vaultMx = New-Object Threading.Mutex($false, 'Global\guard-vault-state'); try { $vaultGot = $vaultMx.WaitOne($vaultWait) } catch [Threading.AbandonedMutexException] { $vaultGot = $true } } catch { }
+    if ($VaultTry -and -not $vaultGot) { if ($vaultMx) { $vaultMx.Dispose() }; return $false }
     try {
-        $s = Read-VaultState; if (-not $s) { throw 'no vault' }
-        & $Change $s
-        Save-VaultState $s
-    } finally { if ($got) { try { $m.ReleaseMutex() } catch { } }; if ($m) { $m.Dispose() } }
+        $vaultNow = Read-VaultState; if (-not $vaultNow) { throw 'no vault' }
+        [void](& $VaultChange $vaultNow)
+        Save-VaultState $vaultNow
+        return $true
+    } finally { if ($vaultGot) { try { $vaultMx.ReleaseMutex() } catch { } }; if ($vaultMx) { $vaultMx.Dispose() } }
 }
 
 # ---- the hidden owner account and the vault folder's permissions --------------------------
@@ -207,6 +218,7 @@ function Initialize-VaultRoot([string]$Root, [string]$OwnerSid) {
             if (($script:VaultTrusted + @($OwnerSid)) -notcontains $o) { throw "$Root already exists and wasn't made by guard: rename or delete it first" }
         }
     } else { New-Item -ItemType Directory -Path $Root -Force | Out-Null }
+    try { (Get-Item -LiteralPath $Root -Force).Attributes = 'Directory, Hidden, System' } catch { }
     if (Test-VaultNoAcl) { return }
     $r = Invoke-Icacls @($Root, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', "*${OwnerSid}:(OI)(CI)F")
     if (-not $r.Ok) { throw "couldn't set the vault folder's permissions: $($r.Out)" }
@@ -239,15 +251,18 @@ function Write-VaultFile([string]$Plain, [string]$Out, [string]$PubXml) {
         $fs.Position = 4; $fs.Write($mac, 0, 32); $fs.Flush()
     } catch { $fs.Dispose(); Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw } finally { $fs.Dispose(); $aes.Dispose() }
     Move-Item -LiteralPath $tmp -Destination $Out -Force
+    return ,$fk   # the file's own key: lets the writer check the new file without the PIN
 }
-function Read-VaultFile([string]$Gv, [string]$Out, $Priv) {
-    # checks the file, then writes the plain bytes to $Out (or nowhere); returns their SHA-256
+function Read-VaultFile([string]$Gv, [string]$Out, $Priv, [byte[]]$FileKey = $null) {
+    # checks the file, then writes the plain bytes to $Out (or nowhere); returns their SHA-256.
+    # -FileKey: the key Write-VaultFile just used (a check right after writing, no PIN needed)
     $fs = [IO.File]::Open($Gv, 'Open', 'Read', 'Read')
     try {
         $br = New-Object IO.BinaryReader($fs)
         if (-not (Test-VaultSame $br.ReadBytes(4) $script:VaultMagic)) { throw 'not a vault file' }
         $mac = $br.ReadBytes(32); $wl = [int]$br.ReadUInt16(); $wrap = $br.ReadBytes($wl)
-        try { $fk = $Priv.Decrypt($wrap, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256) } catch { throw 'damaged or changed (its key does not open)' }
+        if ($FileKey) { $fk = $FileKey }
+        else { try { $fk = $Priv.Decrypt($wrap, [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256) } catch { throw 'damaged or changed (its key does not open)' } }
         $fs.Position = 36
         $h = New-Object Security.Cryptography.HMACSHA256 (,(Get-VaultPart $fk 32 32)); $calc = $h.ComputeHash($fs); $h.Dispose()
         if (-not (Test-VaultSame $calc $mac)) { throw 'damaged or changed after it was locked' }
@@ -299,6 +314,14 @@ function Test-VaultPlainOk([string]$Path, [string]$UserSid) {
         return ($o -eq $UserSid)
     } catch { return $false }
 }
+function Test-VaultSingleLink([string]$Path) {
+    # A file with a second name somewhere else (a hard link) is never read, sealed or wiped:
+    # that other name could be a Windows file, and sealing wipes the bytes of both names.
+    if (Test-VaultNoAcl) { return $true }
+    try { $o = @(& (Get-GuardTool 'fsutil.exe') hardlink list $Path 2>$null | Where-Object { $_ -and "$_".Trim() }) } catch { return $false }
+    if ($LASTEXITCODE) { return $false }
+    return ($o.Count -eq 1)
+}
 function Get-VaultUserSid([string]$User) {
     try { return (New-Object Security.Principal.NTAccount($User)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { return $null }
 }
@@ -329,78 +352,160 @@ function Open-VaultKeys($S, [string]$Secret, [switch]$Recovery) {
     return @{ Priv = $r; Key = $k }
 }
 
-# ---- close: save back, take the open copies away (no PIN: only the public half is needed) --
-function Close-VaultItem($S, $Item, [string]$User) {
-    # returns @{ Done; Saved; Added; Same; Kept; Busy; Why }
-    $res = @{ Done = $false; Saved = 0; Added = 0; Same = 0; Kept = 0; Busy = 0; Why = '' }
-    $v = @($S.vaults | Where-Object { $_.id -eq $Item.vault })[0]
-    if (-not $v) { $res.Done = $true; return $res }
+# ---- sealing: a real file becomes a sealed copy + an empty placeholder (no PIN needed) ------
+# In a sealed folder every file is a placeholder: an empty file with the same name and date,
+# locked against delete and against writing. The real bytes are only in the vault.
+function Test-SecurityOn { $s = Read-VaultState; return [bool]($s -and $s.on) }
+function Get-SecureVault($S, [string]$Path) {
+    # the sealed folder $Path is in (or is), or $null
+    foreach ($v in @($S.vaults)) { $vp = $v.path.TrimEnd('\'); if ($Path -ieq $vp -or $Path.StartsWith($vp + '\', [StringComparison]::OrdinalIgnoreCase)) { return $v } }
+    return $null
+}
+function Get-SecureRel($V, [string]$Full) { return $Full.Substring($V.path.TrimEnd('\').Length + 1) }
+function Get-SecureGv($V, [string]$Rel) { return (Join-Path (Get-VaultDir $V) ($Rel + '.gv')) }
+function Get-SecureOpen($S, [string]$Full) { return @($S.open | Where-Object { $_.plain -ieq $Full })[0] }
+function Test-SecurePlaceholder($V, [string]$Full) {
+    try { $it = Get-Item -LiteralPath $Full -Force -ErrorAction Stop } catch { return $false }
+    return ((-not $it.PSIsContainer) -and $it.Length -eq 0 -and (Test-Path -LiteralPath (Get-SecureGv $V (Get-SecureRel $V $Full))))
+}
+function Set-SecurePlaceholder([string]$Full, [datetime]$When, [string]$User) {
+    # an empty file with the same name and date: nothing can be written into it, nor delete it
+    [IO.File]::WriteAllBytes($Full, (New-Object byte[] 0))
+    try { (Get-Item -LiteralPath $Full -Force).LastWriteTime = $When } catch { }
+    if (Test-VaultNoAcl) { return }
+    Lock-GuardFile -Path $Full -User $User -Force | Out-Null
+    Invoke-Icacls @($Full, '/deny', ($User + ':(W)')) | Out-Null
+}
+function New-SecureVaultEntry($S, [string]$Folder) {
+    $v = [pscustomobject]@{ id = [guid]::NewGuid().ToString('N').Substring(0, 12); path = $Folder.TrimEnd('\'); root = (Get-VaultRootFor); added = (Get-Date).ToString('o') }
+    New-Item -ItemType Directory -Path (Get-VaultDir $v) -Force | Out-Null
+    $S.vaults = @($S.vaults) + @($v)
+    return $v
+}
+function Protect-SecureFile($S, $V, [string]$Full, [string]$User, $Priv = $null) {
+    # real file -> sealed copy (checked: decrypts to the same bytes) -> placeholder.
+    # Returns 'sealed', 'busy' (try again later), 'gone' or 'fail: <why>'. Never loses a file:
+    # the old sealed copy is replaced only by a checked new one, the real file goes only after that.
+    try { $it = Get-Item -LiteralPath $Full -Force -ErrorAction Stop } catch { return 'gone' }
+    if ($it.Attributes -band [IO.FileAttributes]::ReparsePoint) { return 'fail: a link, not a file' }
+    if (-not (Test-VaultLinkFree (Split-Path $Full -Parent))) { return 'fail: a folder on the way is a link' }
+    if (-not (Test-VaultSingleLink $Full)) { return 'fail: a hard link to another file' }
+    if (Test-GuardBusy $Full) { return 'busy' }
+    $when = $it.LastWriteTime
+    try { $h1 = Get-VaultFileHash $Full } catch { return 'busy' }
+    $gv = Get-SecureGv $V (Get-SecureRel $V $Full); $new = "$gv.check"
+    try { $fk = Write-VaultFile $Full $new $S.dataPub } catch { Remove-Item -LiteralPath $new -Force -EA SilentlyContinue; return ('fail: ' + $_.Exception.Message) }
+    $h2 = $null
+    try { if ($Priv) { $h2 = Read-VaultFile $new $null $Priv } else { $h2 = Read-VaultFile $new $null $null -FileKey $fk } } catch { }
+    if ($h2 -ne $h1) { Remove-Item -LiteralPath $new -Force -EA SilentlyContinue; return 'fail: the sealed copy did not check out' }
+    try { $h3 = Get-VaultFileHash $Full } catch { $h3 = $null }
+    if ($h3 -ne $h1) { Remove-Item -LiteralPath $new -Force -EA SilentlyContinue; return 'busy' }   # changed meanwhile
+    Move-Item -LiteralPath $new -Destination $gv -Force
+    try { Set-VaultOwner $gv $S.ownerSid } catch { }
+    if (-not (Test-VaultNoAcl)) { Unlock-GuardFile -Path $Full -User $User | Out-Null }
+    try { Remove-VaultPlain $Full } catch { return 'busy' }
+    Set-SecurePlaceholder $Full $when $User
+    return 'sealed'
+}
+function Open-SecureFile($S, $V, [string]$Full, [string]$User, $Priv) {
+    # placeholder -> the real file, yours, for a while. Returns its SHA-256. Throws on any problem.
+    $gv = Get-SecureGv $V (Get-SecureRel $V $Full)
+    if (-not (Test-Path -LiteralPath $gv)) { throw 'not in the security vault' }
+    if (-not (Test-VaultLinkFree (Split-Path $Full -Parent))) { throw 'a folder on the way is a link: refused' }
+    if ((Test-Path -LiteralPath $Full) -and -not (Test-SecurePlaceholder $V $Full)) { throw 'a different file is in its place: refused' }
+    $tmp = "$Full.guard-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $h = Read-VaultFile $gv $tmp $Priv                     # checked before the placeholder goes
+    if (-not (Test-VaultNoAcl)) { Unlock-GuardFile -Path $Full -User $User | Out-Null }
+    try { Remove-Item -LiteralPath $Full -Force -ErrorAction Stop } catch { Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue; throw 'the placeholder could not be replaced' }
+    Move-Item -LiteralPath $tmp -Destination $Full
+    Set-VaultPlainOwner $Full $User
+    return $h
+}
+function Sync-SecureItem($S, $Item, [string]$User) {
+    # every 5 seconds while open: a changed file goes into the vault at once (no PIN needed)
+    $v = @($S.vaults | Where-Object { $_.id -eq $Item.vault })[0]; if (-not $v) { return }
+    if (-not (Test-VaultPlainOk $Item.plain (Get-VaultUserSid $User))) { return }   # gone, a link, or not yours: never read it
+    if (-not (Test-VaultSingleLink $Item.plain)) { return }
+    try { $h = Get-VaultFileHash $Item.plain } catch { return }
+    if ($h -eq $Item.hash) { return }
+    $gv = Get-SecureGv $v (Get-SecureRel $v $Item.plain); $new = "$gv.check"
+    try {
+        $fk = Write-VaultFile $Item.plain $new $S.dataPub
+        if ((Read-VaultFile $new $null $null -FileKey $fk) -ne $h) { throw 'check' }
+        Move-Item -LiteralPath $new -Destination $gv -Force; try { Set-VaultOwner $gv $S.ownerSid } catch { }
+        $Item.hash = $h; $Item | Add-Member -NotePropertyName synced -NotePropertyValue (Get-Date).ToString('o') -Force
+    } catch { Remove-Item -LiteralPath $new -Force -EA SilentlyContinue }   # being saved right now: next time
+}
+function Close-SecureItem($S, $Item, [string]$User) {
+    # lock again: last changes in, real file out, placeholder back. 'locked', 'busy' or 'kept'
+    $v = @($S.vaults | Where-Object { $_.id -eq $Item.vault })[0]; if (-not $v) { return 'kept' }
     $sid = Get-VaultUserSid $User
-    $known = @{}; foreach ($p in $Item.files.PSObject.Properties) { $known[$p.Name] = [string]$p.Value }
-    $vdir = Get-VaultDir $v
-    $plainFiles = @()
-    if (Test-Path -LiteralPath $Item.plain) {
-        if (Test-Path -LiteralPath $Item.plain -PathType Leaf) { $plainFiles = @([pscustomobject]@{ Rel = $Item.rel; Full = $Item.plain }) }
-        else {
-            $base = $Item.plain.TrimEnd('\')
-            $plainFiles = @(Get-ChildItem -LiteralPath $base -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                $r = $_.FullName.Substring($base.Length + 1); if ($Item.rel) { $r = Join-Path $Item.rel $r }
-                [pscustomobject]@{ Rel = $r; Full = $_.FullName } })
-        }
+    if (-not (Test-Path -LiteralPath $Item.plain)) {
+        # deleted or renamed while open: the sealed copy stays, the placeholder comes back
+        $gv = Get-SecureGv $v (Get-SecureRel $v $Item.plain)
+        try { Set-SecurePlaceholder $Item.plain (Get-Item -LiteralPath $gv).LastWriteTime $User } catch { }
+        return 'kept'
     }
-    $seen = @{}
-    foreach ($f in $plainFiles) {
-        $seen[$f.Rel] = $true
-        if (-not (Test-VaultPlainOk $f.Full $sid)) { $res.Kept++; continue }   # a link or not yours: never read it back
-        try { $h = Get-VaultFileHash $f.Full } catch { $res.Busy++; continue }
-        if ($known.ContainsKey($f.Rel) -and $known[$f.Rel] -eq $h) { $res.Same++ }
-        else {
-            try { Write-VaultFile $f.Full (Join-Path $vdir ($f.Rel + '.gv')) $S.dataPub } catch { $res.Busy++; continue }
-            if ($known.ContainsKey($f.Rel)) { $res.Saved++ } else { $res.Added++ }
-        }
-        try { Remove-VaultPlain $f.Full } catch { $res.Busy++ }
-    }
-    foreach ($k in $known.Keys) { if (-not $seen[$k]) { $res.Kept++ } }   # deleted while open: the vault copy stays
-    if ($res.Saved -or $res.Added) { try { Set-VaultOwner $vdir $S.ownerSid } catch { } }
-    # take away the folders open made, from the deepest up to the folder's own path
-    if (Test-Path -LiteralPath $Item.plain -PathType Container) {
-        Get-ChildItem -LiteralPath $Item.plain -Recurse -Directory -Force -EA SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending |
-            ForEach-Object { if (-not (Get-ChildItem -LiteralPath $_.FullName -Force -EA SilentlyContinue)) { Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue } }
-    }
-    $p = $Item.plain; if (Test-Path -LiteralPath $p -PathType Leaf) { $p = Split-Path $p -Parent } elseif (-not (Test-Path -LiteralPath $p)) { $p = Split-Path $p -Parent }
-    $stop = Split-Path $v.path -Parent
-    while ($p -and $p.Length -gt $stop.Length -and $p.StartsWith($v.path, [StringComparison]::OrdinalIgnoreCase)) {
-        if ((Test-Path -LiteralPath $p -PathType Container) -and -not (Get-ChildItem -LiteralPath $p -Force -EA SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -EA SilentlyContinue } else { break }
-        $p = Split-Path $p -Parent
-    }
-    $res.Done = ($res.Busy -eq 0)
-    return $res
+    if (-not (Test-VaultPlainOk $Item.plain $sid)) { return 'kept' }   # swapped for a link / someone else's file: never read back
+    $r = Protect-SecureFile $S $v $Item.plain $User
+    if ($r -eq 'sealed') { return 'locked' }
+    if ($r -eq 'gone') { return 'kept' }
+    return 'busy'
 }
-function Close-VaultItems([scriptblock]$Which, [string]$User) {
-    # closes the open items $Which picks; returns one result per item (with .Item)
-    $script:VaultLastClose = @()
-    Update-VaultState {
-        param($s)
-        $keep = @()
-        foreach ($it in @($s.open)) {
-            if (-not (& $Which $it)) { $keep += $it; continue }
-            $r = Close-VaultItem $s $it $User; $r.Item = $it; $script:VaultLastClose += , $r
-            if (-not $r.Done) { $keep += $it }
+function Invoke-SecureSweep($S, $Cfg, [string]$User, [string[]]$Paths = $null) {
+    # every protected folder is sealed; any real file found in one (new, copied in, saved by a
+    # program) is sealed too. $Paths: only these (new files the watcher saw); $null: everything.
+    # Returns how many files it sealed.
+    $n = 0
+    foreach ($f in @($Cfg.folders)) {
+        if (-not $f.path -or -not (Test-Path -LiteralPath $f.path)) { continue }
+        $v = Get-SecureVault $S $f.path
+        if (-not $v) { $v = New-SecureVaultEntry $S $f.path; try { Set-VaultOwner (Get-VaultDir $v) $S.ownerSid } catch { } }
+        $skip = @(); if ($f.skip) { $skip = @($f.skip) }
+        $todo = @()
+        if ($null -eq $Paths) { $todo = @(Get-ChildItem -LiteralPath $f.path -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
+        else {
+            foreach ($p in $Paths) {
+                if (-not $p.StartsWith($v.path + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                if (Test-Path -LiteralPath $p -PathType Container) { $todo += @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
+                else { $todo += $p }
+            }
         }
-        $s.open = $keep
+        foreach ($p in $todo) {
+            $name = Split-Path $p -Leaf
+            if ($name -eq '_guard.json' -or (Test-GuardSkip -Name $name -Extra $skip) -or $name -like '*.guard-*') { continue }
+            if (Get-SecureOpen $S $p) { continue }               # unlocked right now
+            if (Test-SecurePlaceholder $v $p) { continue }      # already sealed
+            try { if (((Get-Date) - (Get-Item -LiteralPath $p -Force).LastWriteTime).TotalSeconds -lt 2) { $script:SecureLater += $p; continue } } catch { continue }
+            $r = Protect-SecureFile $S $v $p $User
+            if ($r -eq 'sealed') { $n++ } elseif ($r -eq 'busy') { $script:SecureLater += $p }
+        }
     }
-    return @($script:VaultLastClose)
+    return $n
 }
-function Invoke-GuardVaultAutoClose([string]$User, [datetime]$Since = [datetime]::MinValue) {
-    # the background guard: closes what was opened more than 30 minutes ago, or before the last
-    # sign-in (a restart). Returns how many it closed.
+function Invoke-SecureTick([string]$User, $Cfg, [datetime]$Since = [datetime]::MinValue, [string[]]$NewPaths = @(), [switch]$Full) {
+    # the background guard, every 5 seconds: unlocked files synced, old ones locked again, new
+    # files sealed. Busy (guard's window is working): does nothing this time.
     $s = Read-VaultState
-    if (-not $s -or -not @($s.open).Count) { return 0 }
-    $min = $script:VaultCloseMin; if ($s.closeAfterMin) { $min = [int]$s.closeAfterMin }
+    if (-not $s -or -not $s.on) { return $false }
+    $script:SecureLater = @()
+    $min = $script:SecureLockMin; if ($s.lockAfterMin) { $min = [int]$s.lockAfterMin }
     $cut = (Get-Date).AddMinutes(-$min)
-    $script:VaultLastClose = @()
-    $r = Close-VaultItems { param($i) $t = [datetime]$i.at; ($t -lt $cut) -or ($t -lt $Since) } $User
-    return @($r | Where-Object { $_.Done }).Count
+    $done = Update-VaultState -VaultTry {
+        param($st)
+        $keep = @()
+        foreach ($it in @($st.open)) {
+            $t = [datetime]$it.at
+            if ((($t -lt $cut) -or ($t -lt $Since)) -and -not (Test-GuardBusy $it.plain)) {
+                if ((Close-SecureItem $st $it $User) -ne 'busy') { continue }
+            } else { Sync-SecureItem $st $it $User }
+            $keep += $it
+        }
+        $st.open = $keep
+        $p = $null; if (-not $Full) { $p = @($NewPaths) }
+        if ($Full -or $p.Count) { [void](Invoke-SecureSweep $st $Cfg $User $p) }
+    }
+    return [bool]$done
 }
 
 # =========================== the commands (guard's window) =================================
@@ -418,7 +523,7 @@ function Test-VaultAdminOk { return ((Test-GuardAdmin) -or (Test-VaultTestMode))
 function New-VaultSetup {
     # the first vault: PIN, chip key, hidden account, recovery code. Returns the state or $null.
     Say ""
-    Say "  first vault: choose the guard PIN. every  open  asks for it."
+    Say "  choose the guard PIN. unlocking a file asks for it."
     Say "  at least 8 characters; longer is safer (an administrator could reset the chip's count"
     Say "  of wrong tries and guess for a long time). nobody, guard included, can show it to you again."
     $p1 = Read-VaultSecret '  new PIN'; $p2 = Read-VaultSecret '  new PIN again'
@@ -427,14 +532,13 @@ function New-VaultSetup {
     $keyName = Get-GuardTestEnv 'GUARD_VAULT_KEYNAME'; if (-not $keyName) { $keyName = 'guard-vault-' + [guid]::NewGuid().ToString('N').Substring(0, 8) }
     try {
         $sid = Initialize-VaultAccount
-        Ok "account" ("{0}  -hidden, switched off: owns the vault, nobody signs in with it" -f (Get-VaultAccount))
         $k = New-VaultRandom 64
         $chip = Protect-VaultChip $k $p1 $keyName
         $rsa = New-Object Security.Cryptography.RSACng 3072
         $code = New-VaultRecoveryCode; $salt = New-VaultRandom 16; $iter = 300000
         if (Test-VaultSoftChip) { $iter = 2000 }
         $s = [pscustomobject]@{
-            version = 1; keyName = $keyName; chipWrap = $chip; ownerSid = $sid
+            version = 1; on = $false; lockAfterMin = $script:SecureLockMin; keyName = $keyName; chipWrap = $chip; ownerSid = $sid
             recSalt = [Convert]::ToBase64String($salt); recIter = $iter
             recWrap = [Convert]::ToBase64String((Protect-VaultBytes $k (Get-VaultStretch (Get-VaultCodeDigits $code) $salt $iter)))
             dataPub = $rsa.ToXmlString($false)
@@ -446,286 +550,233 @@ function New-VaultSetup {
         $t = Open-VaultKeys $s $p1
         if (-not (Test-VaultSame $t.Key $k)) { throw 'the chip did not give the vault key back' }
         $script:VaultSetupKeys = $t
-        Ok "chip" "the vault key is locked in this PC's TPM chip with your PIN"
-    } catch { Say ("  FAIL  {0}" -f $_.Exception.Message) 'Red'; Remove-VaultChipKey $keyName; Say "  nothing was put in a vault." 'Red'; return $null }
+    } catch { Say ("  FAIL  {0}" -f $_.Exception.Message) 'Red'; Remove-VaultChipKey $keyName; Say "  nothing was changed." 'Red'; return $null }
     finally { $p1 = $null; $p2 = $null }
     Say ""
     Say "  recovery code. write it on paper now and keep it away from this PC:" 'Yellow'
     Say ""; Say ("      {0}" -f $code) 'Cyan'; Say ""
-    Say "  it opens every vault without the PIN: on a new PC, after Windows is reinstalled, or"
+    Say "  it opens everything without the PIN: on a new PC, after Windows is reinstalled, or"
     Say "  when the PIN is forgotten. without the PIN and without this code the files are gone for good."
     $back = Read-VaultSecret '  type the recovery code from your paper'
     if ((Get-VaultCodeDigits $back) -ne (Get-VaultCodeDigits $code)) {
         Remove-VaultChipKey $keyName
-        Say "  that is not the code. nothing was put in a vault: type  vault <path>  again for a new PIN and code." 'Red'; return $null
+        Say "  that is not the code. nothing was changed: type  security vault on  again for a new PIN and code." 'Red'; return $null
     }
-    Ok "recovery" "code checked"
     return $s
 }
 
-function Cmd-Vault([string]$Arg) {
-    $a = "$Arg".Trim()
-    if (-not $a) { Show-VaultList; return }
-    if ($a -ieq 'pin') { Cmd-VaultPin; return }
-    if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
-    $path = (Resolve-Path -LiteralPath $a.Trim('"') -ErrorAction SilentlyContinue).Path
-    if (-not $path) { Say "  not found: $a" 'Red'; return }
-    if (-not (Test-Path -LiteralPath $path -PathType Container)) { Say "  not a folder: $path  (a vault holds folders: put the file in one)" 'Red'; return }
-    $path = $path.TrimEnd('\')
-    if (-not (Split-Path $path -Parent)) { Say "  a whole drive can't be a vault. pick a folder on it" 'Red'; return }
-    foreach ($sys in @((Get-GuardWindowsDir), (Get-GuardProgramFiles), (Get-GuardProgramFilesX86), (Get-GuardProgramData))) {
-        if ($sys -and (($path -ieq $sys) -or $path.StartsWith($sys.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) { Say "  Windows and program folders can't be a vault: $sys" 'Red'; return }
+function Cmd-Security([string]$Arg) {
+    switch (("$Arg".Trim() -replace '\s+', ' ').ToLower()) {
+        'vault on'  { Cmd-SecurityOn }
+        'vault off' { Cmd-SecurityOff }
+        'vault'     { Show-SecurityState }
+        'vault pin' { Cmd-VaultPin }
+        default     { Say "  security vault on   or   security vault off" 'Red' }
     }
-    $root = Get-VaultRootFor $path
-    if (($path + '\').StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -or ($root + '\').StartsWith($path + '\', [StringComparison]::OrdinalIgnoreCase)) { Say "  that is the vault's own place" 'Red'; return }
-    if ($path -match '\\(OneDrive|Google Drive|Dropbox)(\\|$|[ -])') { Say "  folders inside OneDrive, Google Drive or Dropbox can't be a vault: an open file would be uploaded" 'Red'; return }
-    if (-not (Test-VaultLinkFree $path)) { Say "  a folder on that path is a link to somewhere else: pick the real folder" 'Red'; return }
+}
+function Show-SecurityState {
     $s = Read-VaultState
-    foreach ($v in @($s.vaults | Where-Object { $_ })) {
-        $vp = $v.path.TrimEnd('\') + '\'; $pp = $path + '\'
-        if ($pp.StartsWith($vp, [StringComparison]::OrdinalIgnoreCase) -or $vp.StartsWith($pp, [StringComparison]::OrdinalIgnoreCase)) { Say ("  already in the vault: {0}" -f $v.name) 'Red'; return }
-    }
-    # a folder protected by  init : stop that protection first (the vault replaces it)
-    $prot = @($script:Cfg.folders | Where-Object { $_.path -ieq $path })
-    foreach ($o in $script:Cfg.folders) {
-        $op = $o.path.TrimEnd('\') + '\'
-        if ($o.path -ine $path -and ((($path + '\').StartsWith($op, [StringComparison]::OrdinalIgnoreCase)) -or $op.StartsWith($path + '\', [StringComparison]::OrdinalIgnoreCase))) { Say ("  part of the protected folder {0}: put that whole folder in the vault, or  remove  it first" -f $o.path) 'Red'; return }
-    }
-    $files = @(Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' })
-    $links = @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
-    if ($links.Count) { Say ("  the folder holds a link ({0}): guard won't follow it. move it out first" -f $links[0].FullName) 'Red'; return }
-    $bytes = [long](($files | Measure-Object Length -Sum).Sum)
-    try { $free = (New-Object IO.DriveInfo((Split-Path $root -Qualifier))).AvailableFreeSpace; if (-not (Test-VaultTestMode) -and $free -lt ($bytes * 1.1 + 50MB)) { Say ("  not enough free space on {0} for the locked copy" -f (Split-Path $root -Qualifier)) 'Red'; return } } catch { }
-    $name = Split-Path $path -Leaf
-    Say ""; Say ("  {0}  -{1}  -{2} files  -{3:N1} MB" -f $name, $path, $files.Count, ($bytes / 1MB))
-    Say "  after this only guard, with your PIN, can open it. the normal folder goes away."
+    if ($s -and $s.on) {
+        Say "  Security Vault is On." 'Green'
+        $n = @($s.open).Count
+        if ($n) { Say ("  {0} file(s) unlocked right now: they lock again by themselves." -f $n) 'Yellow' }
+    } else { Say "  Security Vault is Off.  type  security vault on  to turn it on." }
+}
+function Get-SecureFolderFiles($F) {
+    $skip = @(); if ($F.skip) { $skip = @($F.skip) }
+    return @(Get-ChildItem -LiteralPath $F.path -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '_guard.json' -and -not (Test-GuardSkip -Name $_.Name -Extra $skip) })
+}
 
+function Cmd-SecurityOn {
+    if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
+    $s = Read-VaultState
+    if ($s -and $s.on) { Say "  Security Vault is already On." 'Green'; return }
+    $folders = @($script:Cfg.folders | Where-Object { $_.path -and (Test-Path -LiteralPath $_.path) })
+    if (-not $folders.Count) { Say "  no protected folder yet. type  init  in a folder first, then  security vault on" 'Red'; return }
+    if (@($folders | Where-Object { $_.editing }).Count) { Say "  a folder is unlocked for editing. type  resume all  first, then  security vault on" 'Red'; return }
+    $all = @()
+    foreach ($f in $folders) {
+        if (-not (Test-VaultLinkFree $f.path)) { Say ("  FAIL  {0}: a folder on its path is a link to somewhere else. nothing was changed." -f $f.name) 'Red'; return }
+        if (@(Get-ChildItem -LiteralPath $f.path -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) {
+            Say ("  FAIL  {0} holds a link to somewhere else: guard won't follow it. nothing was changed." -f $f.name) 'Red'; return
+        }
+        $all += @(Get-SecureFolderFiles $f | ForEach-Object { $_.FullName })
+    }
+    $bytes = [long]((@($all | ForEach-Object { (Get-Item -LiteralPath $_ -Force).Length }) | Measure-Object -Sum).Sum)
+    try { $free = (New-Object IO.DriveInfo((Split-Path (Get-VaultRootFor) -Qualifier))).AvailableFreeSpace; if ($free -lt ($bytes * 1.1 + 50MB)) { Say "  not enough free disk space. nothing was changed." 'Red'; return } } catch { }
+    Say ""
+    Say "  Security Vault: every file in your protected folders gets sealed. only your PIN opens one."
     $new = $false
     if (-not $s) { $s = New-VaultSetup; if (-not $s) { return }; $new = $true; $keys = $script:VaultSetupKeys; $script:VaultSetupKeys = $null }
-    else { $keys = Read-VaultUnlock $s; if (-not $keys) { Say "  nothing was put in the vault." 'Red'; return } }
-
-    $id = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $v = [pscustomobject]@{ id = $id; name = $name; path = $path; root = $root; added = (Get-Date).ToString('o'); files = $files.Count }
-    $dir = Join-Path $root $id; $stage = "$dir.new"
+    else { $keys = Read-VaultUnlock $s; if (-not $keys) { Say "  nothing was changed." 'Red'; return } }
     try {
-        Initialize-VaultRoot $root $s.ownerSid
-        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-        New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        $err = Invoke-WithDots '  locking every file' {
-            try {
-                foreach ($f in $files) {
-                    $rel = $f.FullName.Substring($path.Length + 1)
-                    Write-VaultFile $f.FullName (Join-Path $stage ($rel + '.gv')) $s.dataPub
-                }
-                $null
-            } catch { $_.Exception.Message }
-        }
-        if ($err) { throw $err }
-        # check: every locked file opens with the key and gives back exactly the original bytes
-        $bad = Invoke-WithDots '  checking every file' {
-            $n = 0
-            foreach ($f in $files) {
-                $rel = $f.FullName.Substring($path.Length + 1)
-                try { if ((Read-VaultFile (Join-Path $stage ($rel + '.gv')) $null $keys.Priv) -ne (Get-VaultFileHash $f.FullName)) { $n++ } } catch { $n++ }
+        Initialize-VaultRoot (Get-VaultRootFor) $s.ownerSid
+        if ($new) { Save-VaultState $s }   # the keys are kept before anything depends on them
+    } catch { Say ("  FAIL  {0}. nothing was changed." -f $_.Exception.Message) 'Red'; if ($new) { Remove-VaultChipKey $s.keyName }; return }
+
+    # 1: a sealed, checked copy of every file. The folders don't change yet.
+    $res = Invoke-WithDots '  sealing' {
+        $plan = @(); $made = @()
+        try {
+            foreach ($f in $folders) { if (-not (Get-SecureVault $s $f.path)) { $made += (New-SecureVaultEntry $s $f.path) } }
+            foreach ($full in $all) {
+                if (-not (Test-VaultSingleLink $full)) { throw ("{0} is a hard link to another file: guard won't touch it. move it out first" -f (Split-Path $full -Leaf)) }
+                $v = Get-SecureVault $s $full
+                $h1 = Get-VaultFileHash $full
+                $gv = Get-SecureGv $v (Get-SecureRel $v $full); $nw = "$gv.check"
+                [void](Write-VaultFile $full $nw $s.dataPub)
+                $plan += [pscustomobject]@{ V = $v; Full = $full; New = $nw; Gv = $gv; Hash = $h1; When = (Get-Item -LiteralPath $full -Force).LastWriteTime }
+                if ((Read-VaultFile $nw $null $keys.Priv) -ne $h1) { throw ("{0} did not check out" -f (Split-Path $full -Leaf)) }
             }
-            $n
-        }
-        if ($bad) { throw "$bad file(s) did not check out" }
-        Move-Item -LiteralPath $stage -Destination $dir
-        Set-VaultOwner $dir $s.ownerSid
-    } catch {
-        Remove-Item -LiteralPath $stage -Recurse -Force -EA SilentlyContinue
-        Say ("  FAIL  {0}" -f $_.Exception.Message) 'Red'; Say "  nothing was moved: the folder is as it was." 'Red'
-        if ($new) { Remove-VaultChipKey $s.keyName }
-        return
+            return @{ Plan = $plan; Made = $made; Err = $null }
+        } catch { return @{ Plan = $plan; Made = $made; Err = $_.Exception.Message } }
     }
-    Ok "locked" ("{0} files  -encrypted, checked one by one" -f $files.Count)
-    $s.vaults = @($s.vaults) + @($v)
-    Save-VaultState $s
-    Ok "vault" ("{0}  -owned by {1}  -only administrators and SYSTEM may touch it" -f $dir, (Get-VaultAccount))
-    # the vault holds it now: the normal folder goes
-    if ($prot.Count) {
-        $f0 = $prot[0]
-        $script:Cfg.folders = @($script:Cfg.folders | Where-Object { $_.path -ine $path })
-        $script:Cfg.current = 0
-        Save-GuardConfig -Config $script:Cfg -User $script:User; Wait-WatchSync
-        Unlock-GuardTree -Folder $path -User $script:User | Out-Null
-        Unlock-GuardFile -Path (Join-Path $path '_guard.json') -User $script:User | Out-Null
-        Set-GuardOwnerUser -Folder $path -User $script:User | Out-Null
-        Ok "unlocked" "the old delete protection (the vault replaces it)"
+    if ($res.Err) {
+        foreach ($p in $res.Plan) { Remove-Item -LiteralPath $p.New -Force -EA SilentlyContinue }
+        foreach ($m in $res.Made) { Remove-Item -LiteralPath (Get-VaultDir $m) -Recurse -Force -EA SilentlyContinue }
+        $ids = @($res.Made | ForEach-Object { $_.id }); $s.vaults = @($s.vaults | Where-Object { $ids -notcontains $_.id })
+        Say ("  FAIL  {0}" -f $res.Err) 'Red'; Say "  nothing was changed: every file is where it was." 'Red'
+        $keys.Priv.Dispose(); return
     }
-    $left = 0
-    Invoke-WithDots '  removing the normal folder' {
-        foreach ($f in $files) { try { Remove-VaultPlain $f.FullName } catch { } }
-        Remove-Item -LiteralPath (Join-Path $path '_guard.json') -Force -EA SilentlyContinue
-        Get-ChildItem -LiteralPath $path -Recurse -Directory -Force -EA SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue }
-        Remove-Item -LiteralPath $path -Force -EA SilentlyContinue
-    }
-    if (Test-Path -LiteralPath $path) { $left = @(Get-ChildItem -LiteralPath $path -Recurse -File -Force -EA SilentlyContinue).Count }
-    Say ""
-    if ($left) {
-        Say ("  FAIL  {0} file(s) are still in {1}: open in a program?" -f $left, $path) 'Red'
-        Say "  they ARE in the vault. close the program, then delete them yourself." 'Red'
-        return
-    }
-    Ok "removed" "the normal folder (its files are only in the vault now)"
-    Say ""
-    Say "  Folder is in the Vault." 'Green'
-    Say ("  to use a file:  open {0}   or  open <part of a file name>" -f $name) 'DarkGray'
-}
-
-function Show-VaultList {
-    $s = Read-VaultState
-    if (-not $s -or -not @($s.vaults).Count) { Say "  no vault yet. type  vault <path>  to put a folder in it."; return }
-    Say ""
-    $i = 0
-    foreach ($v in @($s.vaults)) {
-        $i++; $n = @(Get-VaultEntries $v).Count
-        Say ("  {0}  {1,-20} {2} files  -was {3}" -f $i, $v.name, $n, $v.path)
-    }
-    $o = @($s.open)
-    if ($o.Count) {
-        Say ""
-        foreach ($it in $o) { Say ("  open   {0}  -since {1:HH:mm}  -closes by itself at {2:HH:mm}" -f $it.plain, ([datetime]$it.at), ([datetime]$it.at).AddMinutes([int]$s.closeAfterMin)) 'Yellow' }
-        Say "  type  close  when you are done." 'Yellow'
-    }
-}
-
-function Find-VaultMatches($S, [string]$Name) {
-    # rows: whole vault folders whose name matches, then files whose path matches
-    $rows = @()
-    foreach ($v in @($S.vaults)) {
-        if ($v.name -ieq $Name -or ($Name -and $v.name -like "*$Name*")) { $rows += [pscustomobject]@{ V = $v; Rel = ''; Label = ("{0}\  (whole folder)" -f $v.name) } }
-    }
-    foreach ($v in @($S.vaults)) {
-        foreach ($e in Get-VaultEntries $v) {
-            if ($Name -and (Split-Path $e.Rel -Leaf) -like "*$Name*") { $rows += [pscustomobject]@{ V = $v; Rel = $e.Rel; Label = ("{0}\{1}" -f $v.name, $e.Rel) } }
-        }
-    }
-    return $rows
-}
-
-function Cmd-Open([string]$Arg) {
-    if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
-    $s = Read-VaultState
-    if (-not $s -or -not @($s.vaults).Count) { Say "  no vault yet. type  vault <path>  to put a folder in it."; return }
-    $name = "$Arg".Trim().Trim('"')
-    if (-not $name) { Show-VaultList; Say ""; Say "  type  open <name>: a vault folder, or part of a file name"; return }
-    $rows = @(Find-VaultMatches $s $name)
-    if (-not $rows.Count) { Say ("  nothing in the vault matches `"{0}`"" -f $name) 'Red'; return }
-    $pick = $rows
-    if ($rows.Count -gt 1) {
-        Say ""; Say ("  {0} match. which ones?" -f $rows.Count)
-        $nums = @(Select-Items @($rows | ForEach-Object { $_.Label }))
-        if (-not $nums.Count) { Say "  cancelled"; return }
-        $pick = @($nums | ForEach-Object { $rows[$_ - 1] })
-    }
-    foreach ($r in $pick) {
-        foreach ($o in @($s.open)) {
-            if ($o.vault -eq $r.V.id -and ($o.rel -eq '' -or $o.rel -eq $r.Rel)) { Say ("  already open: {0}  -type  close  first" -f $o.plain) 'Yellow'; return }
-        }
-    }
-    Say ""; Say ("  open {0}" -f (($pick | ForEach-Object { $_.Label }) -join ', '))
-    $keys = Read-VaultUnlock $s
-    if (-not $keys) { return }
-    $sid = Get-VaultUserSid $script:User
-    $items = @(); $count = 0; $fail = 0
-    foreach ($r in $pick) {
-        $v = $r.V
-        $targets = @(Get-VaultEntries $v | Where-Object { -not $r.Rel -or $_.Rel -eq $r.Rel })
-        $plain = $v.path; if ($r.Rel) { $plain = Join-Path $v.path $r.Rel }
-        $parent = $plain; if ($r.Rel) { $parent = Split-Path $plain -Parent }
-        if (-not (Test-VaultLinkFree $parent)) { Say ("  FAIL  a folder on {0} is a link to somewhere else: not opened" -f $parent) 'Red'; $fail++; continue }
-        $hashes = [ordered]@{}
-        foreach ($e in $targets) {
-            $out = Join-Path $v.path $e.Rel
-            if (Test-Path -LiteralPath $out) { Say ("  FAIL  {0} is already there (a file guard didn't open): not opened" -f $out) 'Red'; $fail++; continue }
+    # 2: every copy in place, then every file becomes a placeholder. The background guard waits.
+    $script:SecureLeft = 0
+    [void](Update-VaultState {
+        param($st)
+        $st.vaults = @($s.vaults); $st.on = $true
+        foreach ($p in $res.Plan) {
+            Move-Item -LiteralPath $p.New -Destination $p.Gv -Force
+            try { Set-VaultOwner $p.Gv $s.ownerSid } catch { }
+            $ok = $false
             try {
-                $h = Read-VaultFile $e.Gv $out $keys.Priv
-                Set-VaultPlainOwner $out $script:User
-                $hashes[$e.Rel] = $h; $count++
-            } catch { Say ("  FAIL  {0}  {1}" -f $e.Rel, $_.Exception.Message) 'Red'; $fail++ }
+                if (-not (Test-GuardBusy $p.Full) -and (Get-VaultFileHash $p.Full) -eq $p.Hash) {
+                    if (-not (Test-VaultNoAcl)) { Unlock-GuardFile -Path $p.Full -User $script:User | Out-Null }
+                    Remove-VaultPlain $p.Full
+                    Set-SecurePlaceholder $p.Full $p.When $script:User
+                    $ok = $true
+                }
+            } catch { }
+            if (-not $ok) { $script:SecureLeft++ }   # open or changed right now: the background guard seals it later
         }
-        # the folders open made belong to you too
-        if (-not (Test-VaultTestMode) -or (Test-GuardAdmin)) { if (Test-Path -LiteralPath $v.path) { Invoke-Icacls @($v.path, '/setowner', $script:User) | Out-Null } }
-        $items += [pscustomobject]@{ vault = $v.id; rel = $r.Rel; plain = $plain; at = (Get-Date).ToString('o'); files = [pscustomobject]$hashes }
-    }
+    })
     $keys.Priv.Dispose(); $keys = $null
-    if ($items.Count) { Update-VaultState { param($st) $st.open = @($st.open) + $items } }
+    Set-SecureMenu
+    Write-GuardBadges -Config $script:Cfg
     Say ""
-    if ($fail) { Say ("  {0} file(s) NOT opened (see above). {1} opened." -f $fail, $count) 'Red' }
-    else {
-        Ok "opened" ("{0} file(s)  -normal files again, only these" -f $count)
-        foreach ($it in $items) { Say ("  here    {0}" -f $it.plain) 'Cyan' }
-        Say ("  everything else stays locked. type  close  when done; closes by itself after {0} minutes or at the next restart." -f [int]$s.closeAfterMin) 'DarkGray'
-    }
-    if ($items.Count -and -not (Get-GuardTestEnv 'GUARD_NOBROWSER')) {
-        $show = $items[0].plain; if (Test-Path -LiteralPath $show -PathType Leaf) { $show = Split-Path $show -Parent }
-        try { Start-Process (Join-Path (Get-GuardWindowsDir) 'explorer.exe') -ArgumentList "`"$show`"" } catch { }
-    }
+    if ($script:SecureLeft) {
+        Say ("  {0} file(s) are open in a program right now: they are sealed by themselves as soon as it lets go." -f $script:SecureLeft) 'Yellow'
+        Say "  NOT everything is sealed yet." 'Red'
+    } else { Say "  Security Vault is On." 'Green' }
+    Say "  to use a file: right-click it, then  Unlock with guard." 'DarkGray'
 }
 
-function Cmd-Close([string]$Arg) {
+function Cmd-SecurityOff {
     if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
     $s = Read-VaultState
-    if (-not $s -or -not @($s.open).Count) { Say "  nothing is open."; return }
-    $name = "$Arg".Trim().Trim('"')
-    $script:VaultLastClose = @()
-    $res = @(Close-VaultItems { param($i) (-not $name) -or $name -ieq 'all' -or ($i.plain -like "*$name*") } $script:User)
-    if (-not $res.Count) { Say ("  nothing open matches `"{0}`"" -f $name) 'Red'; return }
-    Say ""
-    $busy = 0
-    foreach ($r in $res) {
-        $bits = @()
-        if ($r.Saved) { $bits += "$($r.Saved) changed saved" }
-        if ($r.Added) { $bits += "$($r.Added) new added" }
-        if ($r.Same) { $bits += "$($r.Same) unchanged" }
-        if ($r.Kept) { $bits += "$($r.Kept) kept in the vault (deleted, or not a normal file of yours, while open)" }
-        if ($r.Done) { Ok "closed" ("{0}  -{1}" -f $r.Item.plain, ($bits -join ', ')) }
-        else { $busy++; Say ("  FAIL  {0}  -{1} file(s) still in use by a program: close it, then  close  again (or it closes by itself)" -f $r.Item.plain, $r.Busy) 'Red' }
-    }
-    Say ""
-    if ($busy) { Say "  NOT everything is locked again (see above)." 'Red' } else { Say "  Vault is Locked Again." 'Green' }
-}
-
-function Cmd-Unvault([string]$Arg) {
-    if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
-    $s = Read-VaultState
-    if (-not $s -or -not @($s.vaults).Count) { Say "  no vault yet."; return }
-    $name = "$Arg".Trim().Trim('"')
-    $targets = @($s.vaults | Where-Object { $name -ieq 'all' -or $_.name -ieq $name })
-    if (-not $targets.Count) { Say ("  no vault folder named `"{0}`". type  vault  to see them" -f $name) 'Red'; return }
-    Say ""; foreach ($v in $targets) { Say ("  {0}  -back to {1}  -a normal folder again, anyone can read it" -f $v.name, $v.path) }
-    $a = Read-Line "  type YES to take it out of the vault > "
-    if ($a.Trim() -ne 'YES') { Say "  cancelled"; return }
+    if (-not $s -or -not $s.on) { Say "  Security Vault is already Off."; return }
+    Say ""; Say "  Security Vault off: every file comes back as a normal file, still protected from deleting."
     $keys = Read-VaultUnlock $s
-    if (-not $keys) { return }
-    # whatever is open is saved back first, so nothing is lost
-    $ids = @($targets | ForEach-Object { $_.id }); $script:VaultLastClose = @()
-    $cl = @(Close-VaultItems { param($i) $ids -contains $i.vault } $script:User)
-    if (@($cl | Where-Object { -not $_.Done }).Count) { Say "  some open files are still in use: close the program first. nothing was taken out." 'Red'; return }
-    $s = Read-VaultState
-    $bad = 0
-    foreach ($t in $targets) {
-        $v = @($s.vaults | Where-Object { $_.id -eq $t.id })[0]
-        $es = @(Get-VaultEntries $v); $n = 0; $err = 0
-        if (-not (Test-VaultLinkFree $v.path)) { Say ("  FAIL  a folder on {0} is a link: not taken out" -f $v.path) 'Red'; $bad++; continue }
-        New-Item -ItemType Directory -Path $v.path -Force | Out-Null
-        foreach ($e in $es) {
-            $out = Join-Path $v.path $e.Rel
-            if (Test-Path -LiteralPath $out) { $err++; Say ("  FAIL  {0} already exists" -f $out) 'Red'; continue }
-            try { [void](Read-VaultFile $e.Gv $out $keys.Priv); $n++ } catch { $err++; Say ("  FAIL  {0}  {1}" -f $e.Rel, $_.Exception.Message) 'Red' }
+    if (-not $keys) { Say "  nothing was changed." 'Red'; return }
+    $script:SecureBad = 0
+    [void](Update-VaultState {
+        param($st)
+        $st.on = $false   # first: the background guard stops sealing
+        $keepV = @()
+        foreach ($v in @($st.vaults)) {
+            $bad = 0
+            foreach ($e in Get-VaultEntries $v) {
+                $full = Join-Path $v.path $e.Rel; $tmp = "$full.guard-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+                try {
+                    if ((Test-Path -LiteralPath $full) -and -not (Test-SecurePlaceholder $v $full)) {
+                        # unlocked right now: the real file is already here and newest
+                    } else {
+                        if (-not (Test-VaultLinkFree (Split-Path $full -Parent))) { throw 'a folder on the way is a link' }
+                        $when = $null; try { $when = (Get-Item -LiteralPath $full -Force -EA Stop).LastWriteTime } catch { }
+                        [void](Read-VaultFile $e.Gv $tmp $keys.Priv)
+                        if (Test-Path -LiteralPath $full) {
+                            if (-not (Test-VaultNoAcl)) { Unlock-GuardFile -Path $full -User $script:User | Out-Null }
+                            Remove-Item -LiteralPath $full -Force -ErrorAction Stop
+                        }
+                        Move-Item -LiteralPath $tmp -Destination $full
+                        if ($when) { try { (Get-Item -LiteralPath $full -Force).LastWriteTime = $when } catch { } }
+                        Set-VaultPlainOwner $full $script:User
+                    }
+                    if (-not (Test-VaultNoAcl)) { Lock-GuardFile -Path $full -User $script:User -Force | Out-Null }   # normal protection again
+                } catch { $bad++; Remove-Item -LiteralPath $tmp -Force -EA SilentlyContinue }
+            }
+            if ($bad) { $script:SecureBad += $bad; $keepV += $v } else { Remove-Item -LiteralPath (Get-VaultDir $v) -Recurse -Force -EA SilentlyContinue }
         }
-        if (-not (Test-VaultTestMode) -or (Test-GuardAdmin)) { Invoke-Icacls @($v.path, '/setowner', $script:User, '/T', '/C') | Out-Null }
-        if ($err) { $bad++; Say ("  {0}: {1} file(s) not taken out: the vault keeps all of them." -f $v.name, $err) 'Red'; continue }
-        Remove-Item -LiteralPath (Get-VaultDir $v) -Recurse -Force -EA SilentlyContinue
-        Update-VaultState { param($st) $st.vaults = @($st.vaults | Where-Object { $_.id -ne $v.id }) }
-        Ok "taken out" ("{0}  -{1} files  -{2}" -f $v.name, $n, $v.path)
-    }
+        $st.vaults = @($keepV); $st.open = @()
+        if ($keepV.Count) { $st.on = $true }   # what could not come back stays sealed
+    })
     $keys.Priv.Dispose()
+    if (-not (Test-SecurityOn)) { Set-SecureMenu -Off }
+    Write-GuardBadges -Config $script:Cfg
     Say ""
-    if ($bad) { Say "  NOT everything was taken out (see above)." 'Red' } else { Say "  Folder is out of the Vault." 'Green' }
+    if ($script:SecureBad) { Say ("  {0} file(s) could not come back: they stay sealed. type  security vault off  again." -f $script:SecureBad) 'Red' }
+    else { Say "  Security Vault is Off." 'Green' }
 }
+
+function Invoke-SecurityUnlock([string]$Path) {
+    # right-click -> Unlock with guard (guard's own admin window). Returns 0 when unlocked.
+    Say ""
+    $s = Read-VaultState
+    if (-not $s -or -not $s.on) { Say "  Security Vault is off: nothing to unlock."; return 1 }
+    $full = "$Path".Trim().Trim('"')
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\', '.') }
+    try { $full = (Resolve-Path -LiteralPath $full -ErrorAction Stop).ProviderPath.TrimEnd('\') } catch { Say "  not found." 'Red'; return 1 }
+    $v = Get-SecureVault $s $full
+    if (-not $v) { Say "  this is not in the Security Vault." 'Red'; return 1 }
+    $targets = @()
+    if (Test-Path -LiteralPath $full -PathType Container) { $targets = @(Get-ChildItem -LiteralPath $full -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { Test-SecurePlaceholder $v $_.FullName } | ForEach-Object { $_.FullName }) }
+    elseif (Test-SecurePlaceholder $v $full) { $targets = @($full) }
+    if (-not $targets.Count) {
+        if (Get-SecureOpen $s $full) { Say "  already unlocked." 'Green'; Open-SecureShown $full; return 0 }
+        Say "  nothing locked here."; return 1
+    }
+    Say ("  unlock  {0}" -f (Split-Path $full -Leaf))
+    $keys = Read-VaultUnlock $s
+    if (-not $keys) { return 1 }
+    $script:SecureOpened = 0; $script:SecureFailed = 0
+    [void](Update-VaultState {
+        param($st)
+        foreach ($t in $targets) {
+            try {
+                $h = Open-SecureFile $st $v $t $script:User $keys.Priv
+                $st.open = @($st.open) + @([pscustomobject]@{ vault = $v.id; plain = $t; at = (Get-Date).ToString('o'); hash = $h })
+                $script:SecureOpened++
+            } catch { $script:SecureFailed++; Say ("  FAIL  {0}  {1}" -f (Split-Path $t -Leaf), $_.Exception.Message) 'Red' }
+        }
+    })
+    $keys.Priv.Dispose(); $keys = $null
+    Write-GuardBadges -Config $script:Cfg
+    if ($script:SecureOpened) { Open-SecureShown $full }
+    if ($script:SecureFailed) { Say "  NOT everything was unlocked (see above)." 'Red'; return 1 }
+    Say ("  Unlocked. it locks again by itself {0} minutes after you opened it, once no program uses it." -f [int]$s.lockAfterMin) 'Green'
+    return 0
+}
+function Open-SecureShown([string]$Full) {
+    # the file opens in its normal program (Explorer starts it in your normal session)
+    if (Get-GuardTestEnv 'GUARD_NOBROWSER') { return }
+    try { Start-Process (Join-Path (Get-GuardWindowsDir) 'explorer.exe') -ArgumentList "`"$Full`"" } catch { }
+}
+function Set-SecureMenu([switch]$Off) {
+    # Explorer: right-click -> "Unlock with guard" on files and folders (only while it is on)
+    if (Test-VaultNoAcl) { return }
+    $keys = @('SOFTWARE\Classes\*\shell\guard-unlock', 'SOFTWARE\Classes\Directory\shell\guard-unlock')
+    foreach ($k in $keys) { try { [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree($k, $false) } catch { } }
+    if ($Off) { return }
+    $g = Join-Path $script:InstallDir 'guard.ps1'
+    $cmd = '"{0}" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Unlock "%1"' -f (Get-GuardPowerShellExe), $g
+    foreach ($k in $keys) {
+        try {
+            $r = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($k)
+            $r.SetValue('MUIVerb', 'Unlock with guard'); $r.SetValue('HasLUAShield', '')
+            $c = $r.CreateSubKey('command'); $c.SetValue('', $cmd); $c.Close(); $r.Close()
+        } catch { }
+    }
+}
+
+
 
 function Cmd-VaultPin {
     if (-not (Test-VaultAdminOk)) { Say "  needs administrator" 'Red'; return }
@@ -751,26 +802,28 @@ function Cmd-VaultPin {
 }
 
 function Show-VaultLine {
-    # under the status block, only while something is open
+    # under the status block, only while the Security Vault is on
     try {
         $s = Read-VaultState
-        if ($s -and @($s.open).Count) { Say ("vault     {0} item(s) open, readable by any program: type  close  when done" -f @($s.open).Count) 'Yellow' }
+        if (-not $s -or -not $s.on) { return }
+        $n = @($s.open).Count
+        if ($n) { Say ("vault     Security Vault on  -  {0} file(s) unlocked, they lock again by themselves" -f $n) 'Yellow' }
+        else { Say "vault     Security Vault on" 'Green' }
     } catch { }
 }
 function Test-GuardVaultInUse { $s = Read-VaultState; return [bool]($s -and @($s.vaults).Count) }
 function Remove-GuardVaultSystem {
-    # uninstall, only when no vault folder is left: the chip key, the account, the empty roots
+    # uninstall, only when nothing is sealed: the chip key, the account, the hidden folder, the menu
     $s = Read-VaultState
     if ($s -and @($s.vaults).Count) { return $false }
-    if ($s) { Remove-VaultChipKey $s.keyName; foreach ($t in @(Get-VaultStatePath)) { Remove-Item -LiteralPath $t -Force -EA SilentlyContinue } }
+    if ($s) { Remove-VaultChipKey $s.keyName }
+    Remove-Item -LiteralPath (Get-VaultStatePath) -Force -EA SilentlyContinue
     if (-not (Get-GuardTestEnv 'GUARD_VAULT_NOACCOUNT')) { try { Remove-LocalUser -Name (Get-VaultAccount) -ErrorAction Stop } catch { } }
-    if (-not (Test-VaultTestMode)) {
-        foreach ($d in [IO.DriveInfo]::GetDrives()) {
-            if ($d.DriveType -ne 'Fixed') { continue }
-            $r = Join-Path $d.RootDirectory.FullName 'guard-vault'
-            $there = $false; try { $there = Test-Path -LiteralPath $r -ErrorAction Stop } catch { }
-            if ($there) { Remove-Item -LiteralPath (Join-Path $r 'vault-keys.json') -Force -EA SilentlyContinue; if (-not (Get-ChildItem -LiteralPath $r -Force -EA SilentlyContinue)) { Remove-Item -LiteralPath $r -Force -EA SilentlyContinue } }
-        }
+    $r = Get-VaultRootFor
+    if (Test-Path -LiteralPath $r) {
+        Remove-Item -LiteralPath (Join-Path $r 'vault-keys.json') -Force -EA SilentlyContinue
+        if (-not (Get-ChildItem -LiteralPath $r -Recurse -File -Force -EA SilentlyContinue)) { Remove-Item -LiteralPath $r -Recurse -Force -EA SilentlyContinue }
     }
+    Set-SecureMenu -Off
     return $true
 }

@@ -12,8 +12,9 @@ $script:BadgeIds  = [ordered]@{
     protected = @('  guard protected', '{EA217AC8-DBCE-4840-A3D5-2B523734FE42}')
     editing   = @('  guard editing',   '{63881172-D367-4037-A670-EDA74C5CDCA4}')
     partly    = @('  guard partly',    '{6E58515F-415E-47BD-91E2-68E340A81040}')
+    sealed    = @('  guard sealed',    '{3C8F2B71-5E4A-4D09-9B6E-7A1D2C4F8E53}')   # Security Vault: blue shield
 }
-$script:BadgeLook = 'lock-1'   # change it when the pictures change: new file names, so Explorer drops its cached ones
+$script:BadgeLook = 'lock-2'   # change it when the pictures change: new file names, so Explorer drops its cached ones
 $script:DotNet    = Join-Path (Get-GuardWindowsDir) 'Microsoft.NET\Framework64\v4.0.30319'
 
 # ---- the list Explorer's helper reads ----------------------------------------------------
@@ -21,6 +22,8 @@ $script:DotNet    = Join-Path (Get-GuardWindowsDir) 'Microsoft.NET\Framework64\v
 #   editing|C:\Docs              a folder in edit (everything inside: orange)
 #   skip|C:\Shots|*.tmp          never locked there: no badge
 #   open|C:\Shots\a.png          not locked yet: red, and red on every folder that holds it
+#   sealed|C:\Shots              Security Vault on there (everything inside: blue shield)
+#   unsealed|C:\Shots\a.png      unlocked with the PIN right now: orange until it locks again
 function Get-GuardBadgeListPath {
     if (-not $script:GuardConfigPath) { return $null }
     return Join-Path (Split-Path $script:GuardConfigPath -Parent) 'badges.txt'
@@ -41,14 +44,19 @@ function Write-GuardBadges {
         $file = Get-GuardBadgeListPath; if (-not $file) { return }
         $old = Read-GuardBadgeLines $file
         $new = New-Object Collections.Generic.List[string]; $locked = @()
+        # Security Vault (guard-vault.ps1, when loaded): sealed folders and what is unlocked now
+        $sec = $null; if (Get-Command Read-VaultState -ErrorAction SilentlyContinue) { try { $sec = Read-VaultState } catch { } }
+        $sealed = @(); if ($sec -and $sec.on) { $sealed = @($sec.vaults | ForEach-Object { $_.path }) }
         foreach ($f in @($Config.folders)) {
             if (-not $f.path) { continue }
             if ($f.editing) { $new.Add("editing|$($f.path)"); continue }
-            $new.Add("protected|$($f.path)"); $locked += $f.path
+            if ($sealed -contains $f.path) { $new.Add("sealed|$($f.path)") } else { $new.Add("protected|$($f.path)") }
+            $locked += $f.path
             $own = @(); if ($f.skip) { $own = @($f.skip) }
             foreach ($p in @($script:BuiltinSkip + $own | Select-Object -Unique)) { $new.Add("skip|$($f.path)|$p") }
         }
         foreach ($l in $old) { if ($l.StartsWith('open|') -and (Test-GuardBadgeUnder $l.Substring(5) $locked)) { $new.Add($l) } }
+        if ($sec -and $sec.on) { foreach ($o in @($sec.open)) { if ($o.plain) { $new.Add("unsealed|$($o.plain)") } } }
         Save-GuardBadgeLines $file $old $new
     } catch { }
 }
@@ -99,9 +107,9 @@ function Update-GuardBadgeView([string[]]$Old, [string[]]$New) {
     $roots = @(); $items = @()
     foreach ($l in $changed) {
         $p = $l -split '\|'
-        if ($p[0] -eq 'open') { $items += $p[1] } elseif ($p.Count -ge 2) { $roots += $p[1] }
+        if ($p[0] -eq 'open' -or $p[0] -eq 'unsealed') { $items += $p[1] } elseif ($p.Count -ge 2) { $roots += $p[1] }
     }
-    $all = @(@($Old) + @($New) | Where-Object { $_ -match '^(protected|editing)\|' } | ForEach-Object { ($_ -split '\|')[1] })
+    $all = @(@($Old) + @($New) | Where-Object { $_ -match '^(protected|editing|sealed)\|' } | ForEach-Object { ($_ -split '\|')[1] })
     $dirs = @(); $one = @()
     foreach ($r in ($roots | Select-Object -Unique)) {
         $one += $r; $dirs += $r
@@ -179,6 +187,7 @@ function Install-GuardBadges {
     Save-GuardBadgeIcon "$base-protected.ico" '#188038' 'closed'
     Save-GuardBadgeIcon "$base-editing.ico"   '#c45a0a' 'open'
     Save-GuardBadgeIcon "$base-partly.ico"    '#c5221f' 'bang'
+    Save-GuardBadgeIcon "$base-sealed.ico"    '#1a3a8f' 'shield'
     $out = & (Join-Path $script:DotNet 'RegAsm.exe') /codebase /nologo /silent $dll 2>&1
     if ($LASTEXITCODE -ne 0) { throw "couldn't register the badge helper: $out" }
     $k = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($script:BadgeKey)
@@ -250,6 +259,18 @@ function Save-GuardBadgeIcon([string]$Path, [string]$Color, [string]$Kind) {
             $g.DrawLine($pen, [float]$cx, [float]$top, [float]$cx, [float]($top + $len))
             $dr = $bw * 0.62
             $g.FillEllipse([Drawing.Brushes]::White, [float]($cx - $dr), [float]($y + $d * 0.73 - $dr), [float](2 * $dr), [float](2 * $dr))
+        } elseif ($Kind -eq 'shield') {
+            # white shield (flat top, pointed bottom) with a small blue keyhole
+            $w2 = $d * 0.26; $top = $y + $d * 0.22; $mid = $y + $d * 0.52; $bot = $y + $d * 0.80
+            $pts = [Drawing.PointF[]]@(
+                (New-Object Drawing.PointF ([float]($cx - $w2)), ([float]$top)), (New-Object Drawing.PointF ([float]($cx + $w2)), ([float]$top)),
+                (New-Object Drawing.PointF ([float]($cx + $w2)), ([float]$mid)), (New-Object Drawing.PointF ([float]$cx), ([float]$bot)),
+                (New-Object Drawing.PointF ([float]($cx - $w2)), ([float]$mid)))
+            $g.FillPolygon([Drawing.Brushes]::White, $pts)
+            $kr = [Math]::Max(1, $d * 0.06)
+            $g.FillEllipse($b, [float]($cx - $kr), [float]($y + $d * 0.40 - $kr), [float](2 * $kr), [float](2 * $kr))
+            $g.FillRectangle($b, [float]($cx - $kr * 0.45), [float]($y + $d * 0.40), [float]($kr * 0.9), [float]($d * 0.14))
+            $pen = New-Object Drawing.Pen ([Drawing.Color]::White), 1   # (disposed below with the others)
         } else {
             # padlock: body + shackle; 'open' = the same lock, only the left leg stops short of the body
             $bw = $d * 0.40; $bh = $d * 0.30; $bx = $cx - $bw / 2; $by = $cy - $bh * 0.15
@@ -280,7 +301,7 @@ function Save-GuardBadgeIcon([string]$Path, [string]$Color, [string]$Kind) {
 
 # ---- the helper's code (C# 5, built with the .NET Framework compiler every Windows has) ----
 $script:BadgeCode = @'
-// guard badges: three Explorer icon overlays - protected, editing, partly.
+// guard badges: four Explorer icon overlays - protected, editing, partly, sealed (Security Vault).
 // Explorer asks each overlay "is this item yours?" for every file and folder it shows. The
 // answer comes from %ProgramData%\guard\badges.txt (written by guard), kept in memory and read
 // again at most 4 times a second, only when the file changed. Any problem: no badge.
@@ -309,6 +330,7 @@ namespace GuardBadges
         static readonly object Gate = new object();
         static List<Root> roots = new List<Root>();
         static HashSet<string> open = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static HashSet<string> unsealed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static DateTime stamp = DateTime.MinValue, checkedAt = DateTime.MinValue;
         const StringComparison NoCase = StringComparison.OrdinalIgnoreCase;
 
@@ -335,10 +357,12 @@ namespace GuardBadges
             var r = new List<Root>();
             var byPath = new Dictionary<string, Root>(StringComparer.OrdinalIgnoreCase);
             var o = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var u = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string line in lines)
             {
                 string[] p = line.Split('|');
-                if (p.Length == 2 && (p[0] == "protected" || p[0] == "editing"))
+                if (p.Length == 2 && p[0] == "unsealed") { u.Add(p[1]); continue; }
+                if (p.Length == 2 && (p[0] == "protected" || p[0] == "editing" || p[0] == "sealed"))
                 {
                     var x = new Root(); x.Path = p[1].TrimEnd('\\'); x.State = p[0];
                     r.Add(x); byPath[x.Path] = x;
@@ -351,7 +375,7 @@ namespace GuardBadges
                 else if (p.Length == 2 && p[0] == "open") o.Add(p[1]);
             }
             r.Sort((a, b) => b.Path.Length.CompareTo(a.Path.Length));   // the innermost folder wins
-            roots = r; open = o;
+            roots = r; open = o; unsealed = u;
         }
 
         public static string StateOf(string path, bool isDir)
@@ -364,6 +388,13 @@ namespace GuardBadges
                     if (path.Equals(x.Path, NoCase) || path.StartsWith(x.Path + "\\", NoCase)) { root = x; break; }
                 if (root == null) return null;
                 if (root.State == "editing") return "editing";
+                if (root.State == "sealed")
+                {
+                    if (isDir) return "sealed";
+                    string nm = Path.GetFileName(path);
+                    foreach (Regex g in root.Skip) if (g.IsMatch(nm)) return null;
+                    return unsealed.Contains(path) ? "editing" : "sealed";   // unlocked right now: orange
+                }
                 if (isDir)
                 {
                     string inside = path.TrimEnd('\\') + "\\";
@@ -417,5 +448,8 @@ namespace GuardBadges
 
     [ComVisible(true), Guid("6E58515F-415E-47BD-91E2-68E340A81040"), ClassInterface(ClassInterfaceType.None)]
     public class PartlyBadge : Badge { protected override string State { get { return "partly"; } } }
+
+    [ComVisible(true), Guid("3C8F2B71-5E4A-4D09-9B6E-7A1D2C4F8E53"), ClassInterface(ClassInterfaceType.None)]
+    public class SealedBadge : Badge { protected override string State { get { return "sealed"; } } }
 }
 '@

@@ -6,7 +6,10 @@
 #   -AttachTo   the hidden elevated relay (the caller's pid): opens guard in a window of its own
 #   -OwnWindow  guard runs in a window of its own (always, after the UAC click)
 #   -Caller     the waiting window's pid: told when the green line is about to print
-param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow, [int]$Caller = 0)
+#   -Unlock     Explorer's right-click "Unlock with guard" on a sealed file or folder (Security Vault)
+param([switch]$NoElevate, [switch]$Elevated, [string]$Cwd = '', [string]$ForUser = '', [int]$AttachTo = 0, [switch]$OwnWindow, [int]$Caller = 0, [string]$Unlock = '')
+# a path ending in \ would escape the closing quote on the next command line
+function Get-QuotedArg([string]$P) { if ($P.EndsWith('\')) { $P += '.' }; return "`"$P`"" }
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ErrorActionPreference = 'Stop'
@@ -19,6 +22,7 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
     $cwd = (Get-Location).ProviderPath; if ($cwd.EndsWith('\')) { $cwd += '.' }   # "C:\" would escape the quote
     $me  = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -AttachTo $PID -Cwd `"$cwd`" -ForUser `"$me`""
+    if ($Unlock) { $psi += ' -Unlock ' + (Get-QuotedArg $Unlock) }
     Write-Host ""
     $enc = [Console]::OutputEncoding
     # the hidden admin relay opens guard in a window of its own; this one waits until guard exits
@@ -35,6 +39,7 @@ if (-not (Test-GuardAdmin) -and -not $NoElevate) {
 if ($AttachTo) {
     $c = $Cwd; if ($c.EndsWith('\')) { $c += '.' }
     $psi = "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Elevated -Caller $AttachTo -Cwd `"$c`" -ForUser `"$ForUser`" -OwnWindow"
+    if ($Unlock) { $psi += ' -Unlock ' + (Get-QuotedArg $Unlock) }
     # Never in the caller's terminal: that console belongs to a normal process, so any program
     # running as the user can attach to it and type commands (WriteConsoleInput) that the
     # elevated guard would run - proven by redteam.ps1. A console made by an admin process
@@ -56,6 +61,13 @@ $script:Cfg  = Load-GuardConfig
 if (-not $hadMaster -and $script:MemoryFoundIn) {
     Save-GuardConfig -Config $script:Cfg -User $script:User
     $script:Rebuilt = $script:MemoryFoundIn
+}
+if ($Unlock) {
+    # right-click -> Unlock with guard: only the PIN question in this window, then it closes
+    if ($OwnWindow) { try { $Host.UI.RawUI.WindowTitle = 'guard - unlock (administrator)' } catch { } }
+    $code = 1; try { $code = Invoke-SecurityUnlock $Unlock } catch { Write-Host ("  FAIL  {0}" -f $_.Exception.Message) -ForegroundColor Red }
+    if ($OwnWindow) { if ($code) { Read-Host "  press Enter to close" | Out-Null } else { Start-Sleep -Seconds 3 } }
+    exit $code
 }
 
 function Show-AdminWarn {

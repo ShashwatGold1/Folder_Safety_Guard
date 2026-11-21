@@ -707,10 +707,8 @@ init                      protect the folder the terminal is in
 init <path>               protect the folder at path
 update                    install the newest guard
 check                     check this PC's safety settings
-vault <path>              put a folder in the vault: PIN to open
-open <name>               open a vault file or folder (PIN)
-close                     lock what is open again
-unvault <name>            take a folder out of the vault
+security vault on         seal every protected folder (PIN)
+security vault off        bring every file back (PIN)
 cls                       clear screen
 help <command>            explain a command
 help all                  explain every command
@@ -1315,10 +1313,7 @@ $script:HelpShort = [ordered]@{
     'init'='protect the folder the terminal is in, or the one at path · locks folder, folder above, every file'
     'update'='install the newest guard from GitHub · protected folders untouched'
     'check'="check this PC's safety settings · check fix = fix what guard can · check account = stop using an admin account every day"
-    'vault'='put a folder in the vault: nobody can read it without your PIN · vault = list · vault pin = change the PIN'
-    'open'='PIN, then only that vault file or folder becomes a normal one again for a while'
-    'close'='save changes back into the vault and lock what is open · close <name> = only that'
-    'unvault'='take a folder out of the vault for good: a normal folder again · unvault all = every one'
+    'security'='security vault on = seal every protected folder: nobody reads a file without your PIN · security vault off = every file back'
     'cls'="clear the screen and show the command table and every folder's status again"
     'help'='help <command> explains one command · help all explains every command'
     'uninstall'='remove guard from this PC · unlocks everything, removes the background guard · files stay on the disk'
@@ -1393,30 +1388,17 @@ Defender samples) after you type YES. check account  makes a second account
 for admin work and then makes your daily account a standard one, so programs
 you run can't get admin rights. Nothing about startup or booting.
 '@
-    'vault'=@'
-vault <path>  moves a folder into the vault. Every file is encrypted and kept in
-<drive>:\guard-vault, owned by a hidden account nobody signs in with; you, Explorer
-and every program (AI agents too) get "access denied", and an administrator who
-takes the files gets scrambled bytes. The normal folder goes away. The first time,
-you choose the guard PIN (kept by this PC's TPM chip, which counts wrong tries) and
-get a recovery code for paper. vault  lists the vault. vault pin  changes the PIN.
-'@
-    'open'=@'
-open <name>  asks for the PIN, then puts back only what you picked, as normal
-files at the folder's old place: a whole vault folder (its name) or files (part of
-a name). Everything else stays locked. While open, programs you run can read those
-files. close  locks them again; they also close by themselves after 30 minutes and
-at the next restart. At the PIN question,  recovery  uses the recovery code.
-'@
-    'close'=@'
-Saves every change back into the vault (no PIN needed), adds new files you made
-there, and takes the open copies away. A file deleted while open stays in the
-vault. A file still in use by a program stays open: close the program, then
-close  again, or the background guard closes it a little later.
-'@
-    'unvault'=@'
-unvault <name>  needs YES and the PIN, then puts the whole folder back as a normal
-folder you own and removes it from the vault. unvault all  does every one.
+    'security'=@'
+security vault on  asks for the PIN (the first time you choose it and get a
+recovery code for paper), then seals every protected folder: each file is
+encrypted into a place only guard can reach, and an empty placeholder with the
+same name stays, with a blue shield badge. Nobody, AI agents and administrators
+included, can read a sealed file without the PIN. To use one: right-click it,
+Unlock with guard, Yes, PIN. Only that file (or folder) is real again; every change
+is sealed within 5 seconds, and it locks again by itself 15 minutes after you
+opened it, once no program uses it, and at every sign-in. New files in a protected
+folder are sealed by themselves. security vault off  (PIN) brings every file back,
+still protected from deleting. At the PIN question,  recovery  uses the code.
 '@
     'uninstall'=@'
 Removes guard from this PC after you type  YES. Every folder is unlocked and
@@ -1436,10 +1418,8 @@ function Show-HelpTable {
   init <path>             same, for the folder at path
   update                  install the newest guard from GitHub · protected folders untouched
   check                   check this PC's safety settings · check fix · check account
-  vault <path>            put a folder in the vault · nobody can read it without your PIN · vault pin = change it
-  open <name>             PIN, then only that vault file or folder is a normal one for a while
-  close                   save changes back and lock what is open · closes by itself after 30 minutes
-  unvault <name>          take a folder out of the vault for good
+  security vault on       seal every protected folder: nobody reads a file without your PIN · right-click, Unlock with guard
+  security vault off      bring every file back (PIN) · still protected from deleting
   cls                 clear the screen and show the command table and every folder's status again
   help <command>          longer explanation of one command
   help all                longer explanation of every command
@@ -1582,7 +1562,7 @@ function Cmd-Update {
 
 function Cmd-Uninstall {
     # vault folders open only through guard: without it they would stay locked for good
-    if (Test-GuardVaultInUse) { Say "  guard has folders in the vault. type  unvault all  first, then  uninstall." 'Red'; return $true }
+    if (Test-GuardVaultInUse) { Say "  the Security Vault is on. type  security vault off  first, then  uninstall." 'Red'; return $true }
     $folders = @($script:Cfg.folders)
     $n = 0; foreach ($f in $folders) { if (Test-Path -LiteralPath $f.path) { $n += @(Get-GuardFiles -Folder $f.path).Count } }
     Say ""; Say ("  This removes guard from this PC. Protected folders: {0}, files: {1}. Nothing is deleted." -f $folders.Count, $n)
@@ -1675,6 +1655,12 @@ function Invoke-GuardCommand([string]$raw) {
     if (-not $raw) { return $true }
     $sp = $raw -split '\s+', 2
     $cmd = $sp[0].ToLower(); $arg = ''; if ($sp.Count -gt 1) { $arg = $sp[1] }
+    # while the Security Vault is on, the files in protected folders are sealed placeholders:
+    # these would work on the placeholders, not on your files
+    if (@('delete', 'move', 'edit', 'resume', 'remove', 'skip') -contains $cmd -and (Test-SecurityOn)) {
+        Say "  the Security Vault is on. type  security vault off  first, then  $cmd" 'Yellow'
+        return $true
+    }
     switch ($cmd) {
         'list'    { Cmd-List $arg }
         'delete'  { Cmd-Delete $arg }
@@ -1689,10 +1675,7 @@ function Invoke-GuardCommand([string]$raw) {
         'cls'       { Clear-Host; Show-Table; $script:ShowAll = $true }
         'help'      { Show-Help $arg }
         'check'     { Cmd-Check $arg }
-        'vault'     { Cmd-Vault $arg }
-        'open'      { Cmd-Open $arg }
-        'close'     { Cmd-Close $arg }
-        'unvault'   { Cmd-Unvault $arg }
+        'security'  { Cmd-Security $arg }
         'update'    { return (Cmd-Update) }
         'uninstall' { return (Cmd-Uninstall) }
         'exit'      { return $false }

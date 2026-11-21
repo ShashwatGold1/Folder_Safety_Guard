@@ -1030,57 +1030,60 @@ guard> check
 
 ---
 
-## 18. vault / open / close / unvault (nobody reads it without the PIN)
+## 18. Security Vault (nobody reads a file without the PIN)
+
+One command turns it on for every protected folder. Everything else happens by itself.
 
 ```
-guard> vault C:\Users\ojhas\Documents\Passwords
+guard> security vault on
 
-  Passwords  -  C:\Users\ojhas\Documents\Passwords  -  14 files  -  0.3 MB
-  after this only guard, with your PIN, can open it. the normal folder goes away.
+  Security Vault: every file in your protected folders gets sealed. only your PIN opens one.
 
-  first vault: choose the guard PIN. every  open  asks for it.
+  choose the guard PIN. unlocking a file asks for it.            <- first time only
   new PIN: ********
   new PIN again: ********
-  account   guard-vault  -  hidden, switched off: owns the vault, nobody signs in with it   ok
-  chip      the vault key is locked in this PC's TPM chip with your PIN                      ok
 
   recovery code. write it on paper now and keep it away from this PC:          <- yellow
       40517-88213-09634-71250-36678-21945                                       <- cyan
   type the recovery code from your paper: ********
-  recovery  code checked                                                         ok
-  locked    14 files  -  encrypted, checked one by one                            ok
-  vault     C:\guard-vault\3f9c...  -  owned by guard-vault  -  only administrators and SYSTEM may touch it   ok
-  removed   the normal folder (its files are only in the vault now)              ok
+  sealing...
 
-  Folder is in the Vault.                                                        <- green
+  Security Vault is On.                                                         <- green
+  to use a file: right-click it, then  Unlock with guard.
 ```
 
+Later times: only `PIN: ********`, then `Security Vault is On.` Nothing ever says where the files went.
+
+In Explorer every protected folder looks the same: the same folders, the same file names and dates. Each file is now an empty placeholder with a blue shield badge, which can't be written into, renamed or deleted.
+
+To use a file: right-click it, **Unlock with guard**, Windows asks Yes, then guard's own window:
+
 ```
-guard> open bank
+  unlock  bank.txt
   PIN  (forgot it, or a new PC: type  recovery): ********
-  opened    1 file(s)  -  normal files again, only these                         ok
-  here      C:\Users\ojhas\Documents\Passwords\bank.txt                          <- cyan
-  everything else stays locked. type  close  when done; closes by itself after 30 minutes or at the next restart.
-
-guard> close
-  closed    C:\Users\ojhas\Documents\Passwords\bank.txt  -  1 changed saved     ok
-  Vault is Locked Again.                                                         <- green
+  Unlocked. it locks again by itself 15 minutes after you opened it, once no program uses it.
 ```
 
-- What holds it shut, from the inside out:
-  - every file is encrypted (AES-256, checked with HMAC-SHA256) with a key of its own
-  - those keys are locked with the vault's data key; the data key with the vault key
-  - the vault key is locked by a key inside this PC's TPM chip that only works with the PIN. The chip counts wrong PINs (32, then one more try every 2 hours). A second copy is locked with the recovery code
-- Where the files are: `<drive>:\guard-vault`, owned by the switched-off `guard-vault` account. Only that account, SYSTEM and administrators are in its permissions. You, Explorer and every program running as you (AI agents too) get "access denied" even to list it. An administrator can take the files, but they are scrambled.
-- `open <name>`: a vault folder's name opens all of it, part of a file name opens those files (a list to pick from when several match). Only what you picked comes back, as normal files at the folder's old place; everything else stays locked. A wrong PIN opens nothing.
-- `close` needs no PIN: it saves changes back, adds files you made there, and takes the open copies away (overwritten with zeros, then deleted). A file deleted while open stays in the vault. A file still open in a program stays open, and closes later.
-- The background guard closes everything opened more than 30 minutes ago, and everything still open at the next sign-in, the same way.
-- At the PIN question, `recovery` asks for the recovery code instead: a new PC, Windows reinstalled, the chip cleared, or the PIN forgotten. `vault pin` changes the PIN.
-- `unvault <name>` (YES + PIN) puts the whole folder back as a normal folder you own. `uninstall` refuses while a folder is in the vault, because without guard it would stay locked for good.
-- Refused: a drive, Windows and program folders, OneDrive/Google Drive/Dropbox folders (an open file would be uploaded), a folder holding links, a folder inside or around another vault or protected folder. A folder protected with `init` loses that protection; the vault replaces it.
-- guard writes open files only along paths with no links, and on close reads back only real files owned by you. A link planted by another program is refused, never followed.
+The placeholder is replaced by the real file (orange badge), which opens in its normal program. Right-clicking a folder unlocks every file in it.
+
+```
+guard> security vault off
+  PIN: ********
+  Security Vault is Off.                                                        <- green
+```
+
+- What happens under the hood, never shown:
+  - every file is encrypted (AES-256, checked with HMAC-SHA256) with a key of its own, and checked to decrypt back to the exact same bytes before the real file goes. If any file fails, nothing changes: `FAIL`, and every file stays where it was.
+  - the sealed copies sit in a hidden folder owned by a hidden, switched-off account (`guard-vault`) that nobody signs in with. Only that account, SYSTEM and administrators are in its permissions: you, Explorer and every program running as you (AI agents too) get "access denied" even to list it. An administrator who takes the files gets scrambled bytes.
+  - the key that opens them is locked by a key in this PC's TPM chip that only works with the PIN. The chip counts wrong PINs (32, then one more try every 2 hours). A second copy is locked with the recovery code.
+- While a file is unlocked, the background guard seals every change within 5 seconds. It locks the file again (last change sealed, real file wiped, placeholder back) 15 minutes after it was opened once no program has it open, and anything still unlocked at the next sign-in.
+- A new file saved or copied into a protected folder is sealed by itself within seconds. Temp files (`~$*`, `*.tmp`, downloads in progress) and skip patterns are left alone.
+- While it is on, `delete`, `move`, `edit`, `resume`, `remove` and `skip` say to turn it off first (they would act on placeholders). `uninstall` refuses: without guard the files would stay sealed for good.
+- `security vault` says whether it is on and how many files are unlocked. `security vault pin` changes the PIN. At the PIN question, `recovery` uses the recovery code instead: a new PC, Windows reinstalled, the chip cleared, or the PIN forgotten.
+- `security vault off` (PIN) brings every file back as a normal file, still protected from deleting as before. A file that can't come back stays sealed and is named in red.
+- Refused or left alone, never followed: a folder holding a link to somewhere else, a file that is a hard link to another file (it could be a Windows file), a file swapped for a link while unlocked.
 - Stays possible, honestly:
-  - while a file is open, programs you run can read that file. Don't open vault files with an AI agent running.
-  - an attacker with administrator rights who is already on the PC when you type the PIN could catch it (`check account` closes most of this).
-  - file names inside the vault folder can be seen by administrators, never their contents.
+  - while a file is unlocked, programs you run can read that file. Don't unlock files with an AI agent running.
+  - an attacker with administrator rights already on the PC when you type the PIN could catch it (`check account` closes most of this). Type the PIN only right after Windows' own dimmed Yes prompt.
+  - file names and folder layout stay visible (that is what the placeholders are for), never the contents.
   - without the PIN and without the recovery code, the files are gone for good.
