@@ -118,3 +118,10 @@ Every time you want people to get a new version:
 Click Yes. It shows the version and what changed; type YES, then
 your PIN. It signs and pushes by itself. Until you sign, everyone
 stays on the last signed version, even if new code is pushed.
+
+Command Prompt (cmd) runs the same thing through PowerShell (also
+works where scripts are blocked):
+
+    cd C:\Users\ojhas\Desktop\Folder_Safety_Guard
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\src\guard-sign.ps1 -Setup
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\src\guard-sign.ps1
