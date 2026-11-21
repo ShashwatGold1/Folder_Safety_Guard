@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$script:GuardVersion = '1.0'
+$script:GuardVersion = '1.1'
 $script:GuardRuntime = @('guard.ps1','guard-shell.ps1','guard-core.ps1','guard-config.ps1','guard-watch.ps1','guard-badges.ps1','guard-sign.ps1','guard-check.ps1','guard-vault.ps1')
 $script:EnvKey       = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
 
