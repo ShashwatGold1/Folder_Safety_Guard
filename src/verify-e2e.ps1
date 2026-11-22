@@ -90,7 +90,12 @@ $relRoot = Join-Path $env:TEMP ('guard-e2e-rel-' + [guid]::NewGuid().ToString('N
 $relRsa = New-Object Security.Cryptography.RSACng 2048
 $relSign = { param([byte[]]$d) $relRsa.SignData($d, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1) }
 $env:GUARD_RELEASE_KEY = [Convert]::ToBase64String($relRsa.ExportParameters($false).Modulus)
-function Repo-Files { $h = @{}; foreach ($f in Get-GuardReleaseFiles) { $h[$f] = [IO.File]::ReadAllBytes((Join-Path $repo $f)) }; return $h }
+function Repo-Files {
+    # the repo's files as test release 1.0, whatever version real releases have reached
+    $h = @{}; foreach ($f in Get-GuardReleaseFiles) { $h[$f] = [IO.File]::ReadAllBytes((Join-Path $repo $f)) }
+    $t = [Text.Encoding]::UTF8.GetString($h['src/guard-core.ps1']) -replace "GuardVersion = '[\d\.]+'", "GuardVersion = '1.0'"
+    $h['src/guard-core.ps1'] = [Text.Encoding]::UTF8.GetBytes($t); return $h
+}
 function Publish([string]$Name, $Files, [string]$Ver, [string]$Commit) {
     $d = Join-Path $relRoot $Name; New-GuardReleaseFolder $d $Commit $Files $Ver $relSign
     $env:GUARD_RELEASE_URL = ([Uri]$d).AbsoluteUri; return $d
@@ -127,6 +132,22 @@ Check 'parses as a script block with its param block' ($sb -and $sb.Ast.ParamBlo
 # ---------------------------------------------------------------------------
 Section 'clean start'
 if (Test-Path $prefix) { Write-Host '  guard is already installed here - uninstall it first' -ForegroundColor Red; return }
+# a memory file from a real earlier install (uninstall keeps them): the test install would find it
+# and protect that real folder too, and the test's  remove all  would unprotect it. Stop, say where.
+$tenv = Join-Path $repo 'testing_env'
+$places = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), (Join-Path $env:USERPROFILE 'Downloads'), [Environment]::GetFolderPath('MyPictures')) +
+          @([IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })
+$real = @(foreach ($pl in ($places | Select-Object -Unique)) {
+    if ($pl -and (Test-Path -LiteralPath $pl)) {
+        Get-ChildItem -LiteralPath $pl -Filter '_guard.json' -Recurse -Force -Depth 4 -EA SilentlyContinue |
+            Where-Object { -not $_.FullName.StartsWith($tenv + '\', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.FullName }
+    } }) | Select-Object -Unique
+if (@($real).Count) {
+    Write-Host '  guard memory from a real earlier install - the test install would protect that folder too:' -ForegroundColor Red
+    $real | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    Write-Host '  delete it first (or install guard, remove that folder, uninstall). nothing was changed.' -ForegroundColor Red
+    return
+}
 Check 'no stray background guard before start' (@(Watchers).Count -eq 0)
 Watchers | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
 Remove-Item "$env:ProgramData\guard" -Recurse -Force -EA SilentlyContinue
@@ -394,7 +415,7 @@ Check 'list: shows files' ((Out-Of 'list') -match 'amazon-checkout.png')
 Section 'update line + update to a newer version'
 function With-Version($Files, [string]$Ver, [string]$Extra = '') {
     $h = @{}; foreach ($k in $Files.Keys) { $h[$k] = $Files[$k] }
-    $t = [Text.Encoding]::UTF8.GetString($h['src/guard-core.ps1']) -replace "GuardVersion = '1\.0'", "GuardVersion = '$Ver'"
+    $t = [Text.Encoding]::UTF8.GetString($h['src/guard-core.ps1']) -replace "GuardVersion = '[\d\.]+'", "GuardVersion = '$Ver'"
     $h['src/guard-core.ps1'] = [Text.Encoding]::UTF8.GetBytes($t + $Extra); return $h
 }
 # hacked GitHub first: a 1.1 whose file was changed after signing, then one signed with another key
@@ -471,13 +492,19 @@ try {
     Check 'unlock: only that file' ((Size "$A\amazon-checkout.png") -eq 0)
     Check 'unlocked: orange badge line' ((Get-Content $badgeFile) -contains "unsealed|$A\marker.txt")
     Set-Content "$A\marker.txt" 'TOPSECRET-e2e-marker-changed'; $newHash = Get-VaultFileHash "$A\marker.txt"
-    Check 'the background guard seals the change within seconds' (WaitFor { (@((Read-VaultState).open) | Where-Object { $_.plain -eq "$A\marker.txt" }).hash -eq $newHash } 30)
+    $synced = WaitFor { (@((Read-VaultState).open) | Where-Object { $_.plain -eq "$A\marker.txt" }).hash -eq $newHash } 30
+    Check 'the background guard seals the change within seconds' $synced
     [void](Update-VaultState { param($st) foreach ($i in $st.open) { $i.at = (Get-Date).AddMinutes(-16).ToString('o') } })
-    Check 'the background guard locks it again 15 minutes after opening' (WaitFor { (Size "$A\marker.txt") -eq 0 -and -not @((Read-VaultState).open).Count } 45)
+    $relocked = WaitFor { (Size "$A\marker.txt") -eq 0 -and -not @((Read-VaultState).open).Count } 45
+    Check 'the background guard locks it again 15 minutes after opening' $relocked
     Set-Content "$A\later.txt" 'TOPSECRET-e2e-later'
     Check 'a new file in a protected folder is sealed by the background guard' (WaitFor { (Test-Path "$A\later.txt") -and (Size "$A\later.txt") -eq 0 } 45)
-    if (-not (Test-Path "$A\later.txt") -or (Size "$A\later.txt") -gt 0 -or (Size "$A\marker.txt") -gt 0) {
+    if (-not $synced -or -not $relocked -or -not (Test-Path "$A\later.txt") -or (Size "$A\later.txt") -gt 0 -or (Size "$A\marker.txt") -gt 0) {
         Get-Content "$env:ProgramData\guard\watch-error.log" -Tail 12 -EA SilentlyContinue | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        # what the background guard says it is doing, and what the vault holds for the open file
+        Write-Host ("      watch-status: " + ((Read-WatchStatus) | ConvertTo-Json -Compress)) -ForegroundColor DarkGray
+        Write-Host ("      open: " + (@((Read-VaultState).open) | ConvertTo-Json -Compress) + "  marker size " + (Size "$A\marker.txt")) -ForegroundColor DarkGray
+        Write-Host ("      watchers: " + @(Watchers).Count) -ForegroundColor DarkGray
     }
     Q $vpin; $o = Out-Of 'security vault off'; Write-Host $o -ForegroundColor DarkGray
     Check 'security vault off: Security Vault is Off.' ($o -cmatch 'Security Vault is Off\.')
